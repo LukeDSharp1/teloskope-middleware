@@ -23,5 +23,15 @@ export default async function handler(req, res) {
   });
 
   const data = await response.json();
-  return res.status(200).json(data);
+if (data.access_token) {
+  res.setHeader('Content-Type', 'text/html');
+  return res.status(200).send(`
+    <html>
+      <body style="font-family: sans-serif; text-align: center; padding-top: 100px;">
+        <h2>✅ You're connected!</h2>
+        <p>Please close this window and return to Teloskope.</p>
+      </body>
+    </html>
+  `);
 }
+return res.status(200).json(data);
