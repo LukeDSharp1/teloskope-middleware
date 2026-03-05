@@ -23,5 +23,8 @@ export default async function handler(req, res) {
   });
 
   const data = await response.json();
-  return res.status(200).json(data);
+if (data.access_token) {
+  return res.redirect(302, 'https://teloskope.bubbleapps.io/version-test/onboarding');
+}
+return res.status(200).json(data);
 }
