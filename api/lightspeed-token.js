@@ -9,12 +9,15 @@ export default async function handler(req, res) {
   const { code, domain_prefix } = req.body;
   if (!code || !domain_prefix) return res.status(400).json({ error: 'Missing code or domain_prefix' });
 
+  const credentials = Buffer.from('UzALjuIjAcXN4GifhmSKmfzfM0mZN7oF:arqOzZIbLysIYKEXtdqbShocamux1Chu').toString('base64');
+
   const response = await fetch(`https://${domain_prefix}.retail.lightspeed.app/api/1.0/token`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    headers: { 
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'Authorization': `Basic ${credentials}`
+    },
     body: new URLSearchParams({
-      client_id: 'UzALjuIjAcXN4GifhmSKmfzfM0mZN7oF',
-      client_secret: 'arqOzZIbLysIYKEXtdqbShocamux1Chu',
       code,
       grant_type: 'authorization_code',
       redirect_uri: 'https://teloskope.bubbleapps.io/version-test/api/1.1/wf/lightspeed_oauth_redirect'
