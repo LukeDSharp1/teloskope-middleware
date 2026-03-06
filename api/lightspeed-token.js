@@ -6,17 +6,18 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
-  const { code } = req.body;
-  if (!code) return res.status(400).json({ error: 'Missing code' });
+  const { code, domain_prefix } = req.body;
+  if (!code || !domain_prefix) return res.status(400).json({ error: 'Missing code or domain_prefix' });
 
-  const response = await fetch('https://cloud.lightspeedapp.com/oauth/access_token.php', {
+  const response = await fetch(`https://${domain_prefix}.retail.lightspeed.app/api/1.0/token`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
       client_id: 'UzALjuIjAcXN4GifhmSKmfzfM0mZN7oF',
       client_secret: 'arqOzZIbLysIYKEXtdqbShocamux1Chu',
       code,
-      grant_type: 'authorization_code'
+      grant_type: 'authorization_code',
+      redirect_uri: 'https://teloskope.bubbleapps.io/version-test/api/1.1/wf/lightspeed_oauth_redirect'
     })
   });
 
