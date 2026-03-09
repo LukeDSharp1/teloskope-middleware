@@ -37,6 +37,18 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: "Missing required fields" });
   }
 
+  // Test mode — returns mock response for Bubble API Connector initialization
+  if (shopify_shop_domain === "test.myshopify.com") {
+    return res.status(200).json({
+      success: true,
+      brief_id: "test_brief_id",
+      brief_url: "https://teloskope.bubbleapps.io/version-test/brief/test",
+      audio_url: "https://api.elevenlabs.io/v1/history/test/audio",
+      week_end: "2026-03-08",
+      sms_sent_to: "+61400000000",
+    });
+  }
+
   try {
 
     // ─── DATE CALCULATIONS (Mon–Sun) ─────────────────────────────────────────
