@@ -1,0 +1,7 @@
+{
+  "name": "teloskope-middleware",
+  "version": "1.0.0",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.20.0"
+  }
+}
