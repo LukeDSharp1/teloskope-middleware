@@ -264,12 +264,7 @@ Write the weekly Teloskope brief. Cover: revenue performance, transactions and A
     console.log("Uploading audio to Bubble...");
     const fileName = `teloskope-brief-${user_id}-${weekEnd.toISOString().split("T")[0]}.mp3`;
 
-    const formData = new FormData();
-    formData.append(
-      "file",
-      new Blob([audioBlob], { type: "audio/mpeg" }),
-      fileName
-    );
+    const base64Audio = audioBlob.toString("base64");
 
     const bubbleUploadResponse = await fetch(
       `https://teloskope.bubbleapps.io/version-test/fileupload`,
@@ -277,8 +272,13 @@ Write the weekly Teloskope brief. Cover: revenue performance, transactions and A
         method: "POST",
         headers: {
           Authorization: `Bearer ${process.env.BUBBLE_API_KEY}`,
+          "Content-Type": "application/json",
         },
-        body: formData,
+        body: JSON.stringify({
+          filename: fileName,
+          contents: base64Audio,
+          private: false,
+        }),
       }
     );
 
