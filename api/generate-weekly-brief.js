@@ -48,17 +48,18 @@ export default async function handler(req, res) {
 
     // ─── DATE CALCULATIONS (Mon–Sun) ─────────────────────────────────────────
 
+    // Runs Monday morning AEST — reports on the COMPLETED prior Mon-Sun week
     const now = new Date();
-    const dayOfWeek = now.getDay();
-    const daysFromMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
 
-    const weekStart = new Date(now);
-    weekStart.setDate(now.getDate() - daysFromMonday);
-    weekStart.setHours(0, 0, 0, 0);
-
-    const weekEnd = new Date(weekStart);
-    weekEnd.setDate(weekStart.getDate() + 6);
+    // weekEnd = yesterday (Sunday) at 23:59:59
+    const weekEnd = new Date(now);
+    weekEnd.setDate(now.getDate() - 1);
     weekEnd.setHours(23, 59, 59, 999);
+
+    // weekStart = 6 days before weekEnd (Monday) at 00:00:00
+    const weekStart = new Date(weekEnd);
+    weekStart.setDate(weekEnd.getDate() - 6);
+    weekStart.setHours(0, 0, 0, 0);
 
     const pcwStart = new Date(weekStart);
     pcwStart.setFullYear(pcwStart.getFullYear() - 1);
