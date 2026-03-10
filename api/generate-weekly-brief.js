@@ -272,7 +272,7 @@ Write the weekly Teloskope brief. Cover: revenue performance, transactions and A
     );
 
     const bubbleUploadResponse = await fetch(
-      `${BUBBLE_BASE_URL}/obj/file`,
+      `https://teloskope.bubbleapps.io/version-test/fileupload`,
       {
         method: "POST",
         headers: {
@@ -284,8 +284,8 @@ Write the weekly Teloskope brief. Cover: revenue performance, transactions and A
 
     let audioUrl = null;
     if (bubbleUploadResponse.ok) {
-      const uploadData = await bubbleUploadResponse.json();
-      audioUrl = uploadData?.body?.url || null;
+      const uploadText = await bubbleUploadResponse.text();
+      audioUrl = uploadText.trim();
       console.log("Audio uploaded to Bubble:", audioUrl);
     } else {
       const uploadError = await bubbleUploadResponse.text();
@@ -332,7 +332,7 @@ Write the weekly Teloskope brief. Cover: revenue performance, transactions and A
 
     const bubbleData = await bubbleResponse.json();
     const briefId = bubbleData?.response?.brief_id;
-    const briefUrl = brief_page_base_url;
+    const briefUrl = briefId ? `${brief_page_base_url}${briefId}` : brief_page_base_url;
 
     // ─── TWILIO SMS ───────────────────────────────────────────────────────────
 
