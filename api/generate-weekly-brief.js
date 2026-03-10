@@ -254,12 +254,48 @@ Write the weekly Teloskope brief. Cover: revenue performance, transactions and A
       throw new Error(`ElevenLabs error ${elResponse.status}: ${await elResponse.text()}`);
     }
 
-    const historyItemId = elResponse.headers.get("history-item-id");
-    const audioUrl = historyItemId
-      ? `https://api.elevenlabs.io/v1/history/${historyItemId}/audio`
-      : null;
+    // Get audio as binary buffer
+    const audioBuffer = await elResponse.arrayBuffer();
+    const audioBlob = Buffer.from(audioBuffer);
+    console.log("Audio generated, size:", audioBlob.length, "bytes");
 
-    console.log("Audio generated, history item:", historyItemId);
+    // ─── UPLOAD AUDIO TO BUBBLE FILE STORAGE ─────────────────────────────────
+
+    console.log("Uploading audio to Bubble...");
+    const fileName = `teloskope-brief-${user_id}-${weekEnd.toISOString().split("T")[0]}.mp3`;
+
+    const formData = new FormData();
+    formData.append(
+      "file",
+      new Blob([audioBlob], { type: "audio/mpeg" }),
+      fileName
+    );
+
+    const bubbleUploadResponse = await fetch(
+      `${BUBBLE_BASE_URL}/obj/file`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${process.env.BUBBLE_API_KEY}`,
+        },
+        body: formData,
+      }
+    );
+
+    let audioUrl = null;
+    if (bubbleUploadResponse.ok) {
+      const uploadData = await bubbleUploadResponse.json();
+      audioUrl = uploadData?.body?.url || null;
+      console.log("Audio uploaded to Bubble:", audioUrl);
+    } else {
+      const uploadError = await bubbleUploadResponse.text();
+      console.error("Bubble upload failed:", uploadError);
+      // Fall back to ElevenLabs URL if upload fails
+      const historyItemId = elResponse.headers.get("history-item-id");
+      audioUrl = historyItemId
+        ? `https://api.elevenlabs.io/v1/history/${historyItemId}/audio`
+        : null;
+    }
 
     // ─── POST TO BUBBLE ───────────────────────────────────────────────────────
 
