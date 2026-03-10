@@ -332,7 +332,7 @@ Write the weekly Teloskope brief. Cover: revenue performance, transactions and A
 
     const bubbleData = await bubbleResponse.json();
     const briefId = bubbleData?.response?.brief_id;
-    const briefUrl = briefId ? `${brief_page_base_url}${briefId}` : brief_page_base_url;
+    const briefUrl = brief_page_base_url;
 
     // ─── TWILIO SMS ───────────────────────────────────────────────────────────
 
