@@ -567,7 +567,8 @@ Write the Teloskope Weekly Brief: opening prose (2-3 sentences, no greeting word
 // ─── XERO HELPERS ─────────────────────────────────────────────────────────────
 
 async function fetchXeroBankBalance(access_token, tenant_id) {
-  const r = await fetch("https://api.xero.com/api.xro/2.0/Accounts?type=BANK", {
+  // Use the Bank Summary report — Accounts endpoint doesn't return balances
+  const r = await fetch("https://api.xero.com/api.xro/2.0/Reports/BankSummary", {
     headers: {
       Authorization: `Bearer ${access_token}`,
       "Xero-tenant-id": tenant_id,
@@ -575,20 +576,35 @@ async function fetchXeroBankBalance(access_token, tenant_id) {
     },
   });
   if (r.status === 401) return "UNAUTHORIZED";
-  if (!r.ok) throw new Error(`Xero accounts error: ${r.status} ${await r.text()}`);
+  if (!r.ok) throw new Error(`Xero bank summary error: ${r.status} ${await r.text()}`);
   const data = await r.json();
-  const accounts = data.Accounts || [];
-  console.log("Xero accounts found:", accounts.length, accounts.map(a => ({
-    name: a.Name, status: a.Status, balance: a.Balance, currencyBalance: a.CurrencyBalance
-  })));
-  const total = accounts
-    .filter(a => a.Status === "ACTIVE")
-    .reduce((sum, a) => {
-      // Try Balance first, fall back to CurrencyBalance
-      const bal = parseFloat(a.Balance) || parseFloat(a.CurrencyBalance) || 0;
-      return sum + bal;
-    }, 0);
-  return Math.round(total * 100) / 100;
+
+  // BankSummary report rows: find the closing balance row
+  // Structure: Reports[0].Rows -> find RowType=SummaryRow or Section with closing balance
+  try {
+    const report = data.Reports?.[0];
+    const rows = report?.Rows || [];
+    console.log("Xero BankSummary rows:", JSON.stringify(rows.slice(0, 5)));
+
+    let total = 0;
+    for (const section of rows) {
+      if (section.Rows) {
+        for (const row of section.Rows) {
+          if (row.RowType === "Row" && row.Cells) {
+            // Closing balance is typically the last cell
+            const closingCell = row.Cells[row.Cells.length - 1];
+            const val = parseFloat(closingCell?.Value?.replace(/,/g, "") || "0");
+            if (!isNaN(val)) total += val;
+          }
+        }
+      }
+    }
+    console.log("Xero total bank balance:", total);
+    return Math.round(total * 100) / 100;
+  } catch (parseErr) {
+    console.error("Xero parse error:", parseErr.message, JSON.stringify(data).slice(0, 500));
+    return null;
+  }
 }
 
 async function refreshXeroToken(refresh_token, xero_connection_id) {
