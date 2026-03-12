@@ -64,66 +64,72 @@ export default async function handler(req, res) {
     // ─── DATE CALCULATIONS (Mon–Sun, prior week) ─────────────────────────────
     // Cron fires Monday ~9am AEST. "Yesterday" = Sunday = end of prior week.
 
-    // Work in AEST/AEDT (UTC+10/+11) — Vercel runs in UTC
-    // Get current Sydney date by offsetting UTC
-    const now = new Date();
-    const sydneyOffset = 11 * 60; // AEDT March = UTC+11
-    const sydneyNow = new Date(now.getTime() + sydneyOffset * 60 * 1000);
-
-    // weekEnd = last Sunday 23:59:59 Sydney
-    const dayOfWeekSydney = sydneyNow.getUTCDay(); // 0=Sun,1=Mon...
-    const daysToLastSunday = dayOfWeekSydney === 0 ? 7 : dayOfWeekSydney;
-    const weekEndSydney = new Date(sydneyNow);
-    weekEndSydney.setUTCDate(sydneyNow.getUTCDate() - daysToLastSunday);
-    weekEndSydney.setUTCHours(23, 59, 59, 999);
-    // Convert back to UTC for API calls
-    const weekEnd = new Date(weekEndSydney.getTime() - sydneyOffset * 60 * 1000);
-
-    // weekStart = last Monday 00:00:00 Sydney
-    const weekStartSydney = new Date(weekEndSydney);
-    weekStartSydney.setUTCDate(weekEndSydney.getUTCDate() - 6);
-    weekStartSydney.setUTCHours(0, 0, 0, 0);
-    const weekStart = new Date(weekStartSydney.getTime() - sydneyOffset * 60 * 1000);
-
-    // Prior comparable week — same Mon-Sun, last year
-    const pcwStart = new Date(weekStart);
-    pcwStart.setFullYear(pcwStart.getFullYear() - 1);
-    const pcwEnd = new Date(weekEnd);
-    pcwEnd.setFullYear(pcwEnd.getFullYear() - 1);
-
-    // MTD: 1st of month (Sydney) through end of last Sunday
-    const weekEndYear = weekEndSydney.getUTCFullYear();
-    const weekEndMonth = weekEndSydney.getUTCMonth();
-    const mtdStartSydney = new Date(Date.UTC(weekEndYear, weekEndMonth, 1, 0, 0, 0));
-    const mtdStart = new Date(mtdStartSydney.getTime() - sydneyOffset * 60 * 1000);
-    const mtdEnd = new Date(weekEnd);
-
-    // LY MTD — same calendar dates, last year
-    const lyMtdStart = new Date(mtdStart);
-    lyMtdStart.setFullYear(lyMtdStart.getFullYear() - 1);
-    const lyMtdEnd = new Date(mtdEnd);
-    lyMtdEnd.setFullYear(lyMtdEnd.getFullYear() - 1);
-    lyMtdEnd.setUTCHours(23, 59, 59, 999);
-
-    // YTD: 1 Jan Sydney through end of last Sunday
-    const ytdStartSydney = new Date(Date.UTC(weekEndYear, 0, 1, 0, 0, 0));
-    const ytdStart = new Date(ytdStartSydney.getTime() - sydneyOffset * 60 * 1000);
-
-    const lyYtdStart = new Date(ytdStart);
-    lyYtdStart.setFullYear(lyYtdStart.getFullYear() - 1);
-    const lyYtdEnd = new Date(weekEnd);
-    lyYtdEnd.setFullYear(lyYtdEnd.getFullYear() - 1);
-    lyYtdEnd.setUTCHours(23, 59, 59, 999);
-
+    // All dates calculated in Sydney time (GMT+10 store timezone)
+    // Sydney is AEDT (UTC+11) Oct-Apr, AEST (UTC+10) Apr-Oct
+    // We use Intl to get the correct offset for any given date
     const fmtIso = (d) => d.toISOString();
 
-    // Log date ranges for debugging
-    console.log("Date ranges:", {
+    // Get Sydney UTC offset in minutes for a given UTC date
+    const getSydneyOffsetMs = (utcDate) => {
+      const utcStr = utcDate.toLocaleString("en-US", { timeZone: "Australia/Sydney" });
+      const sydneyDate = new Date(utcStr + " UTC");
+      return sydneyDate - utcDate; // positive = ahead of UTC
+    };
+
+    // Convert a Sydney local date (year, month 0-indexed, day, hour, min, sec) to UTC Date
+    const sydneyToUTC = (year, month, day, hour = 0, min = 0, sec = 0) => {
+      // Approximate: create UTC date and adjust for Sydney offset
+      const approx = new Date(Date.UTC(year, month, day, hour, min, sec));
+      const offsetMs = getSydneyOffsetMs(approx);
+      return new Date(approx.getTime() - offsetMs);
+    };
+
+    const now = new Date();
+
+    // Get current date in Sydney
+    const sydneyNowStr = now.toLocaleString("en-AU", { timeZone: "Australia/Sydney" });
+    const sydneyNow = new Date(sydneyNowStr);
+    // Parse Sydney date parts
+    const [dayPart, monthPart, yearPart] = sydneyNowStr.split(",")[0].split("/").map(Number);
+
+    // Find last Sunday in Sydney time
+    // today is Monday when cron fires
+    const todaySydney = new Date(Date.UTC(yearPart, monthPart - 1, dayPart));
+    const dowToday = todaySydney.getUTCDay(); // 1 = Monday
+    const daysToSunday = dowToday === 0 ? 7 : dowToday;
+
+    const weekEndDay = dayPart - daysToSunday;
+    const weekEndDate = new Date(Date.UTC(yearPart, monthPart - 1, weekEndDay));
+    const weekStartDate = new Date(Date.UTC(yearPart, monthPart - 1, weekEndDay - 6));
+
+    // Convert to UTC API boundaries using Sydney timezone
+    const weekEnd   = sydneyToUTC(weekEndDate.getUTCFullYear(), weekEndDate.getUTCMonth(), weekEndDate.getUTCDate(), 23, 59, 59);
+    const weekStart = sydneyToUTC(weekStartDate.getUTCFullYear(), weekStartDate.getUTCMonth(), weekStartDate.getUTCDate(), 0, 0, 0);
+
+    // PCW — same Mon-Sun calendar dates, last year
+    const pcwStart = sydneyToUTC(weekStartDate.getUTCFullYear() - 1, weekStartDate.getUTCMonth(), weekStartDate.getUTCDate(), 0, 0, 0);
+    const pcwEnd   = sydneyToUTC(weekEndDate.getUTCFullYear() - 1, weekEndDate.getUTCMonth(), weekEndDate.getUTCDate(), 23, 59, 59);
+
+    // MTD — 1st of month through end of last Sunday, Sydney time
+    const mtdStart = sydneyToUTC(weekEndDate.getUTCFullYear(), weekEndDate.getUTCMonth(), 1, 0, 0, 0);
+    const mtdEnd   = new Date(weekEnd);
+
+    // LY MTD — same calendar dates last year
+    const lyMtdStart = sydneyToUTC(weekEndDate.getUTCFullYear() - 1, weekEndDate.getUTCMonth(), 1, 0, 0, 0);
+    const lyMtdEnd   = sydneyToUTC(weekEndDate.getUTCFullYear() - 1, weekEndDate.getUTCMonth(), weekEndDate.getUTCDate(), 23, 59, 59);
+
+    // YTD — 1 Jan through end of last Sunday
+    const ytdStart   = sydneyToUTC(weekEndDate.getUTCFullYear(), 0, 1, 0, 0, 0);
+    const lyYtdStart = sydneyToUTC(weekEndDate.getUTCFullYear() - 1, 0, 1, 0, 0, 0);
+    const lyYtdEnd   = sydneyToUTC(weekEndDate.getUTCFullYear() - 1, weekEndDate.getUTCMonth(), weekEndDate.getUTCDate(), 23, 59, 59);
+
+    // Log for verification
+    console.log("Sydney date ranges:", {
       week: weekStart.toISOString() + " to " + weekEnd.toISOString(),
-      pcw: pcwStart.toISOString() + " to " + pcwEnd.toISOString(),
-      mtd: mtdStart.toISOString() + " to " + mtdEnd.toISOString(),
+      pcw:  pcwStart.toISOString()  + " to " + pcwEnd.toISOString(),
+      mtd:  mtdStart.toISOString()  + " to " + mtdEnd.toISOString(),
       lyMtd: lyMtdStart.toISOString() + " to " + lyMtdEnd.toISOString(),
-      ytd: ytdStart.toISOString() + " to " + weekEnd.toISOString(),
+      ytd:  ytdStart.toISOString()  + " to " + weekEnd.toISOString(),
       lyYtd: lyYtdStart.toISOString() + " to " + lyYtdEnd.toISOString(),
     });
 
