@@ -64,42 +64,68 @@ export default async function handler(req, res) {
     // ─── DATE CALCULATIONS (Mon–Sun, prior week) ─────────────────────────────
     // Cron fires Monday ~9am AEST. "Yesterday" = Sunday = end of prior week.
 
+    // Work in AEST/AEDT (UTC+10/+11) — Vercel runs in UTC
+    // Get current Sydney date by offsetting UTC
     const now = new Date();
+    const sydneyOffset = 11 * 60; // AEDT March = UTC+11
+    const sydneyNow = new Date(now.getTime() + sydneyOffset * 60 * 1000);
 
-    const weekEnd = new Date(now);
-    weekEnd.setDate(now.getDate() - 1);
-    weekEnd.setHours(23, 59, 59, 999);
+    // weekEnd = last Sunday 23:59:59 Sydney
+    const dayOfWeekSydney = sydneyNow.getUTCDay(); // 0=Sun,1=Mon...
+    const daysToLastSunday = dayOfWeekSydney === 0 ? 7 : dayOfWeekSydney;
+    const weekEndSydney = new Date(sydneyNow);
+    weekEndSydney.setUTCDate(sydneyNow.getUTCDate() - daysToLastSunday);
+    weekEndSydney.setUTCHours(23, 59, 59, 999);
+    // Convert back to UTC for API calls
+    const weekEnd = new Date(weekEndSydney.getTime() - sydneyOffset * 60 * 1000);
 
-    const weekStart = new Date(weekEnd);
-    weekStart.setDate(weekEnd.getDate() - 6);
-    weekStart.setHours(0, 0, 0, 0);
+    // weekStart = last Monday 00:00:00 Sydney
+    const weekStartSydney = new Date(weekEndSydney);
+    weekStartSydney.setUTCDate(weekEndSydney.getUTCDate() - 6);
+    weekStartSydney.setUTCHours(0, 0, 0, 0);
+    const weekStart = new Date(weekStartSydney.getTime() - sydneyOffset * 60 * 1000);
 
-    // Prior comparable week (same Mon–Sun, last year)
+    // Prior comparable week — same Mon-Sun, last year
     const pcwStart = new Date(weekStart);
     pcwStart.setFullYear(pcwStart.getFullYear() - 1);
     const pcwEnd = new Date(weekEnd);
     pcwEnd.setFullYear(pcwEnd.getFullYear() - 1);
 
-    // MTD: 1st of the month the week ended in, through to end of that Sunday
-    const mtdStart = new Date(weekEnd.getFullYear(), weekEnd.getMonth(), 1);
-    mtdStart.setHours(0, 0, 0, 0);
+    // MTD: 1st of month (Sydney) through end of last Sunday
+    const weekEndYear = weekEndSydney.getUTCFullYear();
+    const weekEndMonth = weekEndSydney.getUTCMonth();
+    const mtdStartSydney = new Date(Date.UTC(weekEndYear, weekEndMonth, 1, 0, 0, 0));
+    const mtdStart = new Date(mtdStartSydney.getTime() - sydneyOffset * 60 * 1000);
     const mtdEnd = new Date(weekEnd);
 
+    // LY MTD — same calendar dates, last year
     const lyMtdStart = new Date(mtdStart);
     lyMtdStart.setFullYear(lyMtdStart.getFullYear() - 1);
     const lyMtdEnd = new Date(mtdEnd);
     lyMtdEnd.setFullYear(lyMtdEnd.getFullYear() - 1);
+    lyMtdEnd.setUTCHours(23, 59, 59, 999);
 
-    // YTD: 1 Jan this year through end of Sunday
-    const ytdStart = new Date(weekEnd.getFullYear(), 0, 1);
-    ytdStart.setHours(0, 0, 0, 0);
+    // YTD: 1 Jan Sydney through end of last Sunday
+    const ytdStartSydney = new Date(Date.UTC(weekEndYear, 0, 1, 0, 0, 0));
+    const ytdStart = new Date(ytdStartSydney.getTime() - sydneyOffset * 60 * 1000);
 
     const lyYtdStart = new Date(ytdStart);
     lyYtdStart.setFullYear(lyYtdStart.getFullYear() - 1);
-    const lyYtdEnd = new Date(mtdEnd);
+    const lyYtdEnd = new Date(weekEnd);
     lyYtdEnd.setFullYear(lyYtdEnd.getFullYear() - 1);
+    lyYtdEnd.setUTCHours(23, 59, 59, 999);
 
     const fmtIso = (d) => d.toISOString();
+
+    // Log date ranges for debugging
+    console.log("Date ranges:", {
+      week: weekStart.toISOString() + " to " + weekEnd.toISOString(),
+      pcw: pcwStart.toISOString() + " to " + pcwEnd.toISOString(),
+      mtd: mtdStart.toISOString() + " to " + mtdEnd.toISOString(),
+      lyMtd: lyMtdStart.toISOString() + " to " + lyMtdEnd.toISOString(),
+      ytd: ytdStart.toISOString() + " to " + weekEnd.toISOString(),
+      lyYtd: lyYtdStart.toISOString() + " to " + lyYtdEnd.toISOString(),
+    });
 
     const weekLabel = `week ending ${weekEnd.toLocaleDateString("en-AU", { day: "numeric", month: "long", year: "numeric" })}`;
     const monthLabel = weekEnd.toLocaleDateString("en-AU", { month: "long", year: "numeric" });
@@ -110,7 +136,7 @@ export default async function handler(req, res) {
 
     const fetchAllOrders = async (start, end, fields = "total_price,created_at") => {
       let orders = [];
-      let url = `https://${shopify_shop_domain}/admin/api/2024-01/orders.json?status=any&financial_status=paid` +
+      let url = `https://${shopify_shop_domain}/admin/api/2024-01/orders.json?status=any&financial_status=paid,partially_refunded` +
         `&created_at_min=${encodeURIComponent(fmtIso(start))}` +
         `&created_at_max=${encodeURIComponent(fmtIso(end))}` +
         `&fields=${encodeURIComponent(fields)}&limit=250`;
@@ -551,9 +577,17 @@ async function fetchXeroBankBalance(access_token, tenant_id) {
   if (r.status === 401) return "UNAUTHORIZED";
   if (!r.ok) throw new Error(`Xero accounts error: ${r.status} ${await r.text()}`);
   const data = await r.json();
-  const total = (data.Accounts || [])
+  const accounts = data.Accounts || [];
+  console.log("Xero accounts found:", accounts.length, accounts.map(a => ({
+    name: a.Name, status: a.Status, balance: a.Balance, currencyBalance: a.CurrencyBalance
+  })));
+  const total = accounts
     .filter(a => a.Status === "ACTIVE")
-    .reduce((sum, a) => sum + (parseFloat(a.CurrencyBalance) || 0), 0);
+    .reduce((sum, a) => {
+      // Try Balance first, fall back to CurrencyBalance
+      const bal = parseFloat(a.Balance) || parseFloat(a.CurrencyBalance) || 0;
+      return sum + bal;
+    }, 0);
   return Math.round(total * 100) / 100;
 }
 
