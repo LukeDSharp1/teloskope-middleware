@@ -590,25 +590,41 @@ async function fetchXeroBankBalance(access_token, tenant_id) {
   try {
     const report = data.Reports?.[0];
     const rows = report?.Rows || [];
-    console.log("Xero BankSummary rows:", JSON.stringify(rows.slice(0, 5)));
 
+    // Find the SummaryRow in any Section — it has the total closing balance
+    // Structure: Rows[n].Rows[m] where RowType=SummaryRow
+    // Cells: [Total, Opening Balance, Cash Received, Cash Spent, Closing Balance]
+    for (const section of rows) {
+      if (section.Rows) {
+        for (const row of section.Rows) {
+          if (row.RowType === 'SummaryRow' && row.Cells) {
+            const closingBalance = row.Cells[4]?.Value;
+            if (closingBalance != null) {
+              const total = parseFloat(closingBalance.replace(/,/g, ''));
+              console.log('Xero closing balance from SummaryRow:', total);
+              return Math.round(total * 100) / 100;
+            }
+          }
+        }
+      }
+    }
+
+    console.log('Xero: no SummaryRow found, falling back to summing Row closing balances');
     let total = 0;
     for (const section of rows) {
       if (section.Rows) {
         for (const row of section.Rows) {
-          if (row.RowType === "Row" && row.Cells) {
-            // Closing balance is typically the last cell
-            const closingCell = row.Cells[row.Cells.length - 1];
-            const val = parseFloat(closingCell?.Value?.replace(/,/g, "") || "0");
+          if (row.RowType === 'Row' && row.Cells?.length >= 5) {
+            const val = parseFloat(row.Cells[4]?.Value?.replace(/,/g, '') || '0');
             if (!isNaN(val)) total += val;
           }
         }
       }
     }
-    console.log("Xero total bank balance:", total);
+    console.log('Xero total from Row sum:', total);
     return Math.round(total * 100) / 100;
   } catch (parseErr) {
-    console.error("Xero parse error:", parseErr.message, JSON.stringify(data).slice(0, 500));
+    console.error('Xero parse error:', parseErr.message, JSON.stringify(data).slice(0, 500));
     return null;
   }
 }
@@ -636,8 +652,8 @@ async function refreshXeroToken(refresh_token, xero_connection_id) {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          Xero_access_token: data.access_token,
-          Xero_refresh_token: data.refresh_token,
+          xero_access_token: data.access_token,
+          xero_refresh_token: data.refresh_token,
         }),
       });
     } catch (e) { console.error("Failed to save Xero tokens to Bubble:", e.message); }
@@ -670,8 +686,8 @@ async function refreshLightspeedToken(refresh_token, domain_prefix, lightspeed_c
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          Lightspeed_access_token: data.access_token,
-          Lightspeed_refresh_token: data.refresh_token,
+          lightspeed_access_token: data.access_token,
+          lightspeed_refresh_token: data.refresh_token,
         }),
       });
     } catch (e) { console.error("Failed to save Lightspeed tokens to Bubble:", e.message); }
