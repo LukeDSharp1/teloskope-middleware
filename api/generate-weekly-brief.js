@@ -395,13 +395,13 @@ export default async function handler(req, res) {
 
     const lightspeedBlock = hasLightspeed ? `
 IN-STORE (Lightspeed only, for context):
-- This week in-store revenue: ${fmtExact(lsWeekRev)} | transactions: ${lsWeekTx}
-- MTD in-store revenue: ${fmtExact(lsMtdRev)} vs LY: ${fmtExact(lsLyMtdRev)} (${pct(lsMtdRev, lsLyMtdRev)})
+- This week in-store revenue: $${fmtExact(lsWeekRev)} | transactions: ${lsWeekTx}
+- MTD in-store revenue: $${fmtExact(lsMtdRev)} vs LY: $${fmtExact(lsLyMtdRev)} (${pct(lsMtdRev, lsLyMtdRev)})
 ` : '';
 
     const xeroBlock = xeroCashBalance !== null ? `
 CASH POSITION (Xero):
-- Bank balance: ${fmtExact(xeroCashBalance)}
+- Bank balance: $${fmtExact(xeroCashBalance)}
 ` : '';
 
     const locationsBlock = topStates.length > 0 ? `
@@ -420,13 +420,13 @@ PERIOD: ${weekLabel}
 CHANNEL: ${channelNote}
 
 REVENUE (combined online + in-store):
-- This week: ${fmtExact(totalWeekRev)} vs same week last year: ${fmtExact(totalPcwRev)} (${pct(totalWeekRev, totalPcwRev)})
-- MTD (${monthLabel}): ${fmtExact(totalMtdRev)} vs LY MTD: ${fmtExact(totalLyMtdRev)} (${pct(totalMtdRev, totalLyMtdRev)})
-- FYTD (${fyLabel}): ${fmtExact(ytdRev)} vs LY FYTD: ${fmtExact(lyYtdRev)} (${pct(ytdRev, lyYtdRev)})
+- This week: $${fmtExact(totalWeekRev)} vs same week last year: $${fmtExact(totalPcwRev)} (${pct(totalWeekRev, totalPcwRev)})
+- MTD (${monthLabel}): $${fmtExact(totalMtdRev)} vs LY MTD: $${fmtExact(totalLyMtdRev)} (${pct(totalMtdRev, totalLyMtdRev)})
+- FYTD (${fyLabel}): $${fmtExact(ytdRev)} vs LY FYTD: $${fmtExact(lyYtdRev)} (${pct(ytdRev, lyYtdRev)})
 ${xeroBlock}${lightspeedBlock}
 TRANSACTIONS & AOV (combined):
 - This week: ${weekTx + lsWeekTx} orders total (${weekTx} online, ${lsWeekTx} in-store)
-- Online AOV this week: ${fmtExact(weekAov)} vs LY: ${fmtExact(pcwAov)} (${pct(weekAov, pcwAov)})
+- Online AOV this week: $${fmtExact(weekAov)} vs LY: $${fmtExact(pcwAov)} (${pct(weekAov, pcwAov)})
 - MTD transactions: ${totalMtdTx} vs LY MTD: ${totalLyMtdTx} (${pct(totalMtdTx, totalLyMtdTx)})
 
 TOP 5 PRODUCTS THIS WEEK (online, by units):
