@@ -118,10 +118,14 @@ export default async function handler(req, res) {
     const lyMtdStart = sydneyToUTC(weekEndDate.getUTCFullYear() - 1, weekEndDate.getUTCMonth(), 1, 0, 0, 0);
     const lyMtdEnd   = sydneyToUTC(weekEndDate.getUTCFullYear() - 1, weekEndDate.getUTCMonth(), weekEndDate.getUTCDate(), 23, 59, 59);
 
-    // YTD — 1 Jan through end of last Sunday
-    const ytdStart   = sydneyToUTC(weekEndDate.getUTCFullYear(), 0, 1, 0, 0, 0);
-    const lyYtdStart = sydneyToUTC(weekEndDate.getUTCFullYear() - 1, 0, 1, 0, 0, 0);
-    const lyYtdEnd   = sydneyToUTC(weekEndDate.getUTCFullYear() - 1, weekEndDate.getUTCMonth(), weekEndDate.getUTCDate(), 23, 59, 59);
+    // FYTD — Australian Financial Year (1 July - 30 June)
+    // If current month is before July, FY started last year; if July or after, FY started this year
+    const weekEndYear = weekEndDate.getUTCFullYear();
+    const weekEndMonth = weekEndDate.getUTCMonth(); // 0-indexed
+    const fyStartYear = weekEndMonth >= 6 ? weekEndYear : weekEndYear - 1; // >= June (0-indexed = July)
+    const ytdStart   = sydneyToUTC(fyStartYear, 6, 1, 0, 0, 0); // 1 July
+    const lyYtdStart = sydneyToUTC(fyStartYear - 1, 6, 1, 0, 0, 0); // 1 July last FY
+    const lyYtdEnd   = sydneyToUTC(fyStartYear - 1 + (weekEndMonth >= 6 ? 1 : 0), weekEndMonth, weekEndDate.getUTCDate(), 23, 59, 59);
 
     // Log for verification
     console.log("Sydney date ranges:", {
@@ -176,7 +180,7 @@ export default async function handler(req, res) {
       fetchAllOrders(ytdStart, mtdEnd),
       fetchAllOrders(lyYtdStart, lyYtdEnd),
       fetchAllOrders(weekStart, weekEnd, "line_items"),
-      fetchAllOrders(weekStart, weekEnd, "billing_address"),
+      fetchAllOrders(weekStart, weekEnd, "shipping_address,billing_address"),
     ]);
 
     const sumRev = (orders) => orders.reduce((s, o) => s + parseFloat(o.total_price || 0), 0);
@@ -219,19 +223,41 @@ export default async function handler(req, res) {
       .sort((a, b) => b.quantity - a.quantity)
       .slice(0, 5);
 
-    // Top 3 states/locations by order count this week
-    const stateCounts = {};
+    // Locations: top 3 states, top 3 suburbs, international orders
+    const totalLocOrders = weekOrdersForLocations.length;
+    const stateCounts = {}, suburbCounts = {};
+    let intlOrders = 0;
+
     for (const order of weekOrdersForLocations) {
-      const state = order.billing_address?.province_code
-        || order.billing_address?.province
-        || order.billing_address?.country_code
-        || "Unknown";
-      stateCounts[state] = (stateCounts[state] || 0) + 1;
+      const addr = order.shipping_address || order.billing_address;
+      const country = addr?.country_code || "AU";
+      const state = addr?.province_code || addr?.province || "Unknown";
+      const suburb = addr?.city || addr?.suburb || null;
+
+      if (country !== "AU") {
+        intlOrders++;
+      } else {
+        stateCounts[state] = (stateCounts[state] || 0) + 1;
+        if (suburb) suburbCounts[suburb] = (suburbCounts[suburb] || 0) + 1;
+      }
     }
+
     const topStates = Object.entries(stateCounts)
       .sort((a, b) => b[1] - a[1])
       .slice(0, 3)
       .map(([state, count]) => `${state} (${count})`);
+
+    const topSuburbs = Object.entries(suburbCounts)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([suburb, count]) => {
+        const pct = totalLocOrders > 0 ? Math.round((count / totalLocOrders) * 100) : 0;
+        return `${suburb} (${pct}%)`;
+      });
+
+    const intlSummary = intlOrders > 0
+      ? `${intlOrders} international order${intlOrders > 1 ? "s" : ""} (${Math.round((intlOrders / totalLocOrders) * 100)}% of total)`
+      : null;
 
     // ─── LIGHTSPEED IN-STORE DATA (optional) ─────────────────────────────────
 
@@ -379,9 +405,14 @@ CASH POSITION (Xero):
 ` : '';
 
     const locationsBlock = topStates.length > 0 ? `
-CUSTOMER LOCATIONS (top states by orders this week):
-${topStates.join(', ')}
+CUSTOMER LOCATIONS (this week):
+- Top states: ${topStates.join(', ')}
+${topSuburbs.length > 0 ? `- Top suburbs: ${topSuburbs.join(', ')}` : ''}
+${intlSummary ? `- International: ${intlSummary}` : ''}
 ` : '';
+
+    // Australian FY label e.g. "FY2026 (Jul 25 - Jun 26)"
+    const fyLabel = `FY${fyStartYear + 1} (Jul ${String(fyStartYear).slice(2)} – Jun ${String(fyStartYear + 1).slice(2)})`;
 
     const dataBlock = `
 STORE: ${store_name}
@@ -389,22 +420,23 @@ PERIOD: ${weekLabel}
 CHANNEL: ${channelNote}
 
 REVENUE (combined online + in-store):
-- This week: ${fmtExact(totalWeekRev)} vs same week last year (online only): ${fmtExact(totalPcwRev)} (${pct(totalWeekRev, totalPcwRev)})
+- This week: ${fmtExact(totalWeekRev)} vs same week last year: ${fmtExact(totalPcwRev)} (${pct(totalWeekRev, totalPcwRev)})
 - MTD (${monthLabel}): ${fmtExact(totalMtdRev)} vs LY MTD: ${fmtExact(totalLyMtdRev)} (${pct(totalMtdRev, totalLyMtdRev)})
-- YTD: ${fmtExact(ytdRev)} vs LY YTD: ${fmtExact(lyYtdRev)} (${pct(ytdRev, lyYtdRev)})
-${lightspeedBlock}
+- FYTD (${fyLabel}): ${fmtExact(ytdRev)} vs LY FYTD: ${fmtExact(lyYtdRev)} (${pct(ytdRev, lyYtdRev)})
+${xeroBlock}${lightspeedBlock}
 TRANSACTIONS & AOV (combined):
 - This week: ${weekTx + lsWeekTx} orders total (${weekTx} online, ${lsWeekTx} in-store)
 - Online AOV this week: ${fmtExact(weekAov)} vs LY: ${fmtExact(pcwAov)} (${pct(weekAov, pcwAov)})
 - MTD transactions: ${totalMtdTx} vs LY MTD: ${totalLyMtdTx} (${pct(totalMtdTx, totalLyMtdTx)})
 
+TOP 5 PRODUCTS THIS WEEK (online, by units):
+${topProducts.map((p, i) => `${i + 1}. ${p.title} — ${p.quantity} units`).join('\n')}
+
 CUSTOMERS — ONLINE ONLY (MTD):
 - New customers: ${newMtd} vs LY: ${newLyMtd} (${pct(newMtd, newLyMtd)})
 - Returning customers: ${returningMtd} vs LY: ${returningLyMtd} (${pct(returningMtd, returningLyMtd)})
 
-TOP 5 PRODUCTS THIS WEEK (online, by units):
-${topProducts.map((p, i) => `${i + 1}. ${p.title} — ${p.quantity} units`).join('\n')}
-${locationsBlock}${xeroBlock}`;
+${locationsBlock}`;
 
     const systemPrompt = `You are Teloskope, a smart weekly business advisor for independent retail store owners.
 You write a Monday morning brief that owners listen to as audio — so write for the ear, not the eye.
