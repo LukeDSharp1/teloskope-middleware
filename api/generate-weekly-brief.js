@@ -146,7 +146,7 @@ export default async function handler(req, res) {
 
     const fetchAllOrders = async (start, end, fields = "total_price,created_at") => {
       let orders = [];
-      let url = `https://${shopify_shop_domain}/admin/api/2024-01/orders.json?status=any&financial_status=paid,partially_refunded` +
+      let url = `https://${shopify_shop_domain}/admin/api/2024-01/orders.json?status=any` +
         `&created_at_min=${encodeURIComponent(fmtIso(start))}` +
         `&created_at_max=${encodeURIComponent(fmtIso(end))}` +
         `&fields=${encodeURIComponent(fields)}&limit=250`;
@@ -160,7 +160,10 @@ export default async function handler(req, res) {
         const next = link.match(/<([^>]+)>;\s*rel="next"/);
         url = next ? next[1] : null;
       }
-      return orders;
+      return orders.filter(o =>
+        o.financial_status !== 'voided' &&
+        o.financial_status !== 'refunded'
+      );
     };
 
     const [
