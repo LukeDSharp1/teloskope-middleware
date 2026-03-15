@@ -61,6 +61,7 @@ export default async function handler(req, res) {
     weekStart.setDate(weekEnd.getDate() - 6);
     weekStart.setHours(0, 0, 0, 0);
 
+    // Prior corresponding week (same Mon–Sun, one year ago)
     const pcwStart = new Date(weekStart);
     pcwStart.setFullYear(pcwStart.getFullYear() - 1);
     const pcwEnd = new Date(weekEnd);
@@ -89,9 +90,10 @@ export default async function handler(req, res) {
 
     // ─── SHOPIFY HELPERS ──────────────────────────────────────────────────────
 
+    // FIX: financial_status=any to match Shopify dashboard totals (was =paid, which excluded pending/partial)
     const fetchAllOrders = async (start, end, fields = "total_price,created_at") => {
       let orders = [];
-      let url = `https://${shopify_shop_domain}/admin/api/2024-01/orders.json?status=any&financial_status=paid&created_at_min=${fmt(start)}&created_at_max=${fmt(end)}&fields=${fields}&limit=250`;
+      let url = `https://${shopify_shop_domain}/admin/api/2024-01/orders.json?status=any&financial_status=any&created_at_min=${fmt(start)}&created_at_max=${fmt(end)}&fields=${fields}&limit=250`;
       while (url) {
         const r = await fetch(url, {
           headers: { "X-Shopify-Access-Token": shopify_access_token },
@@ -127,6 +129,9 @@ export default async function handler(req, res) {
     // ─── PARALLEL FETCH ───────────────────────────────────────────────────────
 
     console.log("Fetching Shopify data...");
+    console.log("Current week:", weekStart.toISOString(), "→", weekEnd.toISOString());
+    console.log("PCW date range:", pcwStart.toISOString(), "→", pcwEnd.toISOString());
+
     const [
       weekOrders,
       pcwOrders,
@@ -144,6 +149,10 @@ export default async function handler(req, res) {
       fetchAllOrders(lyYtdStart, lyYtdEnd),
       fetchAllOrders(weekStart, weekEnd, "line_items"),
     ]);
+
+    console.log("PCW orders returned:", pcwOrders.length);
+    console.log("PCW revenue:", sumRevenue(pcwOrders));
+    console.log("Week orders returned:", weekOrders.length);
 
     // ─── CALCULATIONS ─────────────────────────────────────────────────────────
 
@@ -242,9 +251,9 @@ Write the weekly Teloskope brief. Cover: revenue performance, transactions and A
     const rawBriefText = claudeResponse.content[0].text;
     console.log("Claude brief generated, chars:", rawBriefText.length);
 
-    // Format brief text as clean HTML for display in Bubble
+    // Format brief text as clean HTML for display in Bubble HTML element
     const briefText = rawBriefText
-      // Convert Option 1/2/3 labels to bold styled headings
+      // Convert Option 1/2/3 labels to bold Teloskope-blue headings
       .replace(/Option (1|2|3):/g, '<strong style="color:#0205D3;">Option $1:</strong>')
       // Wrap each paragraph in <p> tags
       .split(/\n\n+/)
@@ -254,6 +263,9 @@ Write the weekly Teloskope brief. Cover: revenue performance, transactions and A
       .join('\n');
 
     // ─── ELEVENLABS ───────────────────────────────────────────────────────────
+
+    // Send plain text to ElevenLabs (strip HTML tags so voice reads correctly)
+    const plainTextForAudio = rawBriefText;
 
     console.log("Calling ElevenLabs...");
     const elResponse = await fetch(
@@ -265,7 +277,7 @@ Write the weekly Teloskope brief. Cover: revenue performance, transactions and A
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          text: briefText,
+          text: plainTextForAudio,
           model_id: "eleven_turbo_v2_5",
           voice_settings: { stability: 0.5, similarity_boost: 0.75 },
         }),
@@ -283,40 +295,51 @@ Write the weekly Teloskope brief. Cover: revenue performance, transactions and A
 
     // ─── UPLOAD AUDIO TO BUBBLE FILE STORAGE ─────────────────────────────────
 
+    // FIX: Bubble fileupload expects multipart/form-data, not JSON base64
     console.log("Uploading audio to Bubble...");
     const fileName = `teloskope-brief-${user_id}-${weekEnd.toISOString().split("T")[0]}.mp3`;
 
-    const base64Audio = audioBlob.toString("base64");
-
-    const bubbleUploadResponse = await fetch(
-      `https://teloskope.bubbleapps.io/version-test/fileupload`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${process.env.BUBBLE_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          filename: fileName,
-          contents: base64Audio,
-          private: false,
-        }),
-      }
-    );
-
     let audioUrl = null;
-    if (bubbleUploadResponse.ok) {
-      const uploadText = await bubbleUploadResponse.text();
-      audioUrl = uploadText.trim();
-      console.log("Audio uploaded to Bubble:", audioUrl);
-    } else {
-      const uploadError = await bubbleUploadResponse.text();
-      console.error("Bubble upload failed:", uploadError);
-      // Fall back to ElevenLabs URL if upload fails
+
+    try {
+      const form = new FormData();
+      form.append("filename", fileName);
+      form.append(
+        "contents",
+        new Blob([audioBlob], { type: "audio/mpeg" }),
+        fileName
+      );
+      form.append("private", "false");
+
+      const bubbleUploadResponse = await fetch(
+        `https://teloskope.bubbleapps.io/version-test/fileupload`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${process.env.BUBBLE_API_KEY}`,
+            // Do NOT set Content-Type — let fetch set the multipart boundary automatically
+          },
+          body: form,
+        }
+      );
+
+      if (bubbleUploadResponse.ok) {
+        const uploadText = await bubbleUploadResponse.text();
+        audioUrl = uploadText.trim();
+        console.log("Audio uploaded to Bubble CDN:", audioUrl);
+      } else {
+        const uploadError = await bubbleUploadResponse.text();
+        console.error("Bubble upload failed:", uploadError);
+        throw new Error(uploadError);
+      }
+    } catch (uploadErr) {
+      // Fallback: use ElevenLabs history URL if Bubble upload fails
+      console.warn("Falling back to ElevenLabs history URL:", uploadErr.message);
       const historyItemId = elResponse.headers.get("history-item-id");
       audioUrl = historyItemId
         ? `https://api.elevenlabs.io/v1/history/${historyItemId}/audio`
         : null;
+      console.log("Fallback audio URL:", audioUrl);
     }
 
     // ─── POST TO BUBBLE ───────────────────────────────────────────────────────
