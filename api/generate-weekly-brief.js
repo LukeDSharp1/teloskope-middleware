@@ -12,6 +12,82 @@ const TWILIO_PHONE_NUMBER = process.env.TWILIO_PHONE_NUMBER;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const BUBBLE_BASE_URL = "https://teloskope.bubbleapps.io/version-test/api/1.1";
 
+// ─── AEST/AEDT DATE HELPERS ───────────────────────────────────────────────────
+// Vercel runs UTC. All date logic is anchored to Australia/Sydney so that
+// Mon–Sun week boundaries match exactly what the store owner sees in Shopify.
+
+// Returns {year, month (0-indexed), day, dayOfWeek (0=Sun..6=Sat)} in Sydney time
+function getAestDateParts(utcDate) {
+  const fmt = new Intl.DateTimeFormat("en-AU", {
+    timeZone: "Australia/Sydney",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    weekday: "short",
+  });
+  const parts = fmt.formatToParts(utcDate);
+  const get = (type) => parts.find((p) => p.type === type).value;
+  const weekdayMap = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  return {
+    year: parseInt(get("year")),
+    month: parseInt(get("month")) - 1,
+    day: parseInt(get("day")),
+    dayOfWeek: weekdayMap[get("weekday")],
+  };
+}
+
+// Given an AEST {year, month (0-indexed), day}, return the UTC timestamp
+// corresponding to midnight Sydney time on that date (handles DST automatically).
+function aestMidnightToUtc(year, month, day) {
+  // Construct ISO string without timezone, then interpret as Sydney local midnight
+  const pad = (n) => String(n).padStart(2, "0");
+  const localStr = `${year}-${pad(month + 1)}-${pad(day)}T00:00:00`;
+
+  // Intl trick: find the UTC ms value where Sydney clock reads midnight on this date.
+  // We do this by binary-searching, but a simpler approach: use the Date constructor
+  // with a UTC guess and compare Sydney's reading of it.
+  // Fastest reliable method: use the offset from a probe date.
+  const probe = new Date(`${localStr}Z`); // treat as UTC — will be off by offset
+  const sydFmt = new Intl.DateTimeFormat("en-AU", {
+    timeZone: "Australia/Sydney",
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+  });
+  const probePartsRaw = sydFmt.formatToParts(probe);
+  const getPart = (t) => parseInt(probePartsRaw.find(p => p.type === t).value);
+  // Sydney's reading of the probe (which is actually UTC midnight)
+  const sydHour = getPart("hour"); // hours ahead = Sydney UTC offset
+  // Sydney is UTC+10 (AEST) or UTC+11 (AEDT). The probe is UTC midnight.
+  // Sydney reads it as sydHour:00 on the same or next day.
+  // To get UTC time of Sydney midnight: subtract sydHour hours from probe.
+  // But if sydHour is 0, Sydney midnight IS UTC midnight (shouldn't happen for AU).
+  const offsetMs = sydHour * 3600 * 1000;
+  return new Date(probe.getTime() - offsetMs);
+}
+
+// End of day (23:59:59.999) Sydney time as UTC
+function aestEndOfDayToUtc(year, month, day) {
+  const midnight = aestMidnightToUtc(year, month, day);
+  return new Date(midnight.getTime() + 24 * 3600 * 1000 - 1);
+}
+
+// Add/subtract days from an AEST date object, returns new AEST date object
+function aestShiftDays(aestDate, days) {
+  const d = new Date(Date.UTC(aestDate.year, aestDate.month, aestDate.day + days));
+  return { year: d.getUTCFullYear(), month: d.getUTCMonth(), day: d.getUTCDate() };
+}
+
+// Shift year by n
+function aestShiftYear(aestDate, years) {
+  return { ...aestDate, year: aestDate.year + years };
+}
+
+// Format AEST date as human-readable AU string
+function fmtAestDate(aestDate, opts = { day: "numeric", month: "long", year: "numeric" }) {
+  return new Date(Date.UTC(aestDate.year, aestDate.month, aestDate.day))
+    .toLocaleDateString("en-AU", opts);
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
@@ -32,65 +108,81 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: "Missing required fields" });
   }
 
-  // Test mode — returns mock response for Bubble API Connector initialization
+  // Test mode
   if (shopify_shop_domain === "test.myshopify.com") {
     return res.status(200).json({
       success: true,
       brief_id: "test_brief_id",
       brief_url: "https://teloskope.bubbleapps.io/version-test/brief/test",
       audio_url: "https://api.elevenlabs.io/v1/history/test/audio",
-      week_end: "2026-03-08",
+      week_end: "2026-03-15",
       sms_sent_to: "+61400000000",
     });
   }
 
   try {
 
-    // ─── DATE CALCULATIONS (Mon–Sun) ─────────────────────────────────────────
+    // ─── DATE CALCULATIONS (Mon–Sun, AEST/AEDT anchored) ─────────────────────
+    //
+    // The cron fires Monday 8:50am AEST. In UTC this is Sunday night (~21:50 UTC).
+    // Using new Date() directly and calling .getDate()-1 gives SATURDAY in UTC,
+    // not Sunday — the entire week window shifts one day early.
+    //
+    // Fix: get today's date in Sydney timezone first, then compute all ranges from that.
 
-    // Runs Monday morning AEST — reports on the COMPLETED prior Mon-Sun week
-    const now = new Date();
+    const nowUtc = new Date();
+    const todayAest = getAestDateParts(nowUtc);
 
-    // weekEnd = yesterday (Sunday) at 23:59:59
-    const weekEnd = new Date(now);
-    weekEnd.setDate(now.getDate() - 1);
-    weekEnd.setHours(23, 59, 59, 999);
+    console.log("UTC now:", nowUtc.toISOString());
+    console.log("AEST today:", todayAest);
 
-    // weekStart = 6 days before weekEnd (Monday) at 00:00:00
-    const weekStart = new Date(weekEnd);
-    weekStart.setDate(weekEnd.getDate() - 6);
-    weekStart.setHours(0, 0, 0, 0);
+    // weekEnd = last Sunday in AEST (yesterday when running Monday)
+    // dayOfWeek: Mon=1, so daysBackToSunday=1. Robust for any day in case of reruns.
+    const daysBackToSunday = todayAest.dayOfWeek === 0 ? 7 : todayAest.dayOfWeek;
+    const weekEndAest = aestShiftDays(todayAest, -daysBackToSunday);
+    const weekStartAest = aestShiftDays(weekEndAest, -6); // Mon = Sun - 6
 
-    // Prior corresponding week (same Mon–Sun, one year ago)
-    const pcwStart = new Date(weekStart);
-    pcwStart.setFullYear(pcwStart.getFullYear() - 1);
-    const pcwEnd = new Date(weekEnd);
-    pcwEnd.setFullYear(pcwEnd.getFullYear() - 1);
+    // PCW = same Mon–Sun, one year prior
+    const pcwEndAest = aestShiftYear(weekEndAest, -1);
+    const pcwStartAest = aestShiftYear(weekStartAest, -1);
 
-    const mtdStart = new Date(now.getFullYear(), now.getMonth(), 1);
-    mtdStart.setHours(0, 0, 0, 0);
-    const mtdEnd = new Date(now);
-    mtdEnd.setHours(23, 59, 59, 999);
+    // MTD = 1st of current AEST month → today
+    const mtdStartAest = { year: todayAest.year, month: todayAest.month, day: 1 };
+    const mtdEndAest = todayAest;
+    const lyMtdStartAest = aestShiftYear(mtdStartAest, -1);
+    const lyMtdEndAest = aestShiftYear(mtdEndAest, -1);
 
-    const lyMtdStart = new Date(mtdStart);
-    lyMtdStart.setFullYear(lyMtdStart.getFullYear() - 1);
-    const lyMtdEnd = new Date(mtdEnd);
-    lyMtdEnd.setFullYear(lyMtdEnd.getFullYear() - 1);
+    // YTD = Jan 1 → today
+    const ytdStartAest = { year: todayAest.year, month: 0, day: 1 };
+    const ytdEndAest = todayAest;
+    const lyYtdStartAest = aestShiftYear(ytdStartAest, -1);
+    const lyYtdEndAest = aestShiftYear(ytdEndAest, -1);
 
-    const ytdStart = new Date(now.getFullYear(), 0, 1);
-    ytdStart.setHours(0, 0, 0, 0);
+    // Convert to UTC timestamps for Shopify API calls
+    const weekStart   = aestMidnightToUtc(weekStartAest.year, weekStartAest.month, weekStartAest.day);
+    const weekEnd     = aestEndOfDayToUtc(weekEndAest.year, weekEndAest.month, weekEndAest.day);
+    const pcwStart    = aestMidnightToUtc(pcwStartAest.year, pcwStartAest.month, pcwStartAest.day);
+    const pcwEnd      = aestEndOfDayToUtc(pcwEndAest.year, pcwEndAest.month, pcwEndAest.day);
+    const mtdStart    = aestMidnightToUtc(mtdStartAest.year, mtdStartAest.month, mtdStartAest.day);
+    const mtdEnd      = aestEndOfDayToUtc(mtdEndAest.year, mtdEndAest.month, mtdEndAest.day);
+    const lyMtdStart  = aestMidnightToUtc(lyMtdStartAest.year, lyMtdStartAest.month, lyMtdStartAest.day);
+    const lyMtdEnd    = aestEndOfDayToUtc(lyMtdEndAest.year, lyMtdEndAest.month, lyMtdEndAest.day);
+    const ytdStart    = aestMidnightToUtc(ytdStartAest.year, ytdStartAest.month, ytdStartAest.day);
+    const ytdEnd      = aestEndOfDayToUtc(ytdEndAest.year, ytdEndAest.month, ytdEndAest.day);
+    const lyYtdStart  = aestMidnightToUtc(lyYtdStartAest.year, lyYtdStartAest.month, lyYtdStartAest.day);
+    const lyYtdEnd    = aestEndOfDayToUtc(lyYtdEndAest.year, lyYtdEndAest.month, lyYtdEndAest.day);
 
-    const lyYtdStart = new Date(ytdStart);
-    lyYtdStart.setFullYear(lyYtdStart.getFullYear() - 1);
-    const lyYtdEnd = new Date(now);
-    lyYtdEnd.setFullYear(lyYtdEnd.getFullYear() - 1);
-    lyYtdEnd.setHours(23, 59, 59, 999);
+    console.log("Week:   ", weekStart.toISOString(), "→", weekEnd.toISOString());
+    console.log("PCW:    ", pcwStart.toISOString(), "→", pcwEnd.toISOString());
+    console.log("MTD:    ", mtdStart.toISOString(), "→", mtdEnd.toISOString());
+    console.log("LY MTD: ", lyMtdStart.toISOString(), "→", lyMtdEnd.toISOString());
+    console.log("YTD:    ", ytdStart.toISOString(), "→", ytdEnd.toISOString());
+    console.log("LY YTD: ", lyYtdStart.toISOString(), "→", lyYtdEnd.toISOString());
 
     const fmt = (d) => d.toISOString();
 
     // ─── SHOPIFY HELPERS ──────────────────────────────────────────────────────
 
-    // FIX: financial_status=any to match Shopify dashboard totals (was =paid, which excluded pending/partial)
     const fetchAllOrders = async (start, end, fields = "total_price,created_at") => {
       let orders = [];
       let url = `https://${shopify_shop_domain}/admin/api/2024-01/orders.json?status=any&financial_status=any&created_at_min=${fmt(start)}&created_at_max=${fmt(end)}&fields=${fields}&limit=250`;
@@ -126,12 +218,9 @@ export default async function handler(req, res) {
       return { newC, returning };
     };
 
-    // ─── PARALLEL FETCH ───────────────────────────────────────────────────────
+    // ─── PARALLEL SHOPIFY FETCH ───────────────────────────────────────────────
 
     console.log("Fetching Shopify data...");
-    console.log("Current week:", weekStart.toISOString(), "→", weekEnd.toISOString());
-    console.log("PCW date range:", pcwStart.toISOString(), "→", pcwEnd.toISOString());
-
     const [
       weekOrders,
       pcwOrders,
@@ -145,33 +234,34 @@ export default async function handler(req, res) {
       fetchAllOrders(pcwStart, pcwEnd),
       fetchAllOrders(mtdStart, mtdEnd, "total_price,created_at,customer"),
       fetchAllOrders(lyMtdStart, lyMtdEnd, "total_price,created_at,customer"),
-      fetchAllOrders(ytdStart, mtdEnd),
+      fetchAllOrders(ytdStart, ytdEnd),
       fetchAllOrders(lyYtdStart, lyYtdEnd),
       fetchAllOrders(weekStart, weekEnd, "line_items"),
     ]);
 
-    console.log("PCW orders returned:", pcwOrders.length);
-    console.log("PCW revenue:", sumRevenue(pcwOrders));
-    console.log("Week orders returned:", weekOrders.length);
+    console.log("Week orders:", weekOrders.length, "| Revenue:", sumRevenue(weekOrders).toFixed(2));
+    console.log("PCW  orders:", pcwOrders.length,  "| Revenue:", sumRevenue(pcwOrders).toFixed(2));
+    console.log("MTD  orders:", mtdOrders.length,  "| Revenue:", sumRevenue(mtdOrders).toFixed(2));
+    console.log("LY MTD orders:", lyMtdOrders.length, "| Revenue:", sumRevenue(lyMtdOrders).toFixed(2));
 
-    // ─── CALCULATIONS ─────────────────────────────────────────────────────────
+    // ─── METRIC CALCULATIONS ──────────────────────────────────────────────────
 
     const weekRev = sumRevenue(weekOrders);
-    const pcwRev = sumRevenue(pcwOrders);
-    const mtdRev = sumRevenue(mtdOrders);
+    const pcwRev  = sumRevenue(pcwOrders);
+    const mtdRev  = sumRevenue(mtdOrders);
     const lyMtdRev = sumRevenue(lyMtdOrders);
-    const ytdRev = sumRevenue(ytdOrders);
+    const ytdRev  = sumRevenue(ytdOrders);
     const lyYtdRev = sumRevenue(lyYtdOrders);
-    const weekTx = weekOrders.length;
-    const pcwTx = pcwOrders.length;
-    const mtdTx = mtdOrders.length;
+    const weekTx  = weekOrders.length;
+    const pcwTx   = pcwOrders.length;
+    const mtdTx   = mtdOrders.length;
     const lyMtdTx = lyMtdOrders.length;
     const weekAov = calcAov(weekOrders);
-    const pcwAov = calcAov(pcwOrders);
+    const pcwAov  = calcAov(pcwOrders);
     const { newC: newMtd, returning: returningMtd } = countNewReturning(mtdOrders);
     const { newC: newLyMtd, returning: returningLyMtd } = countNewReturning(lyMtdOrders);
 
-    // Top 5 products
+    // Top 5 products by units sold this week
     const productMap = {};
     for (const order of weekOrdersForProducts) {
       for (const item of order.line_items || []) {
@@ -188,15 +278,21 @@ export default async function handler(req, res) {
     const fmt$ = (n) => `$${Math.round(n).toLocaleString()}`;
 
     const hasLyWeek = pcwRev > 0 || pcwTx > 0;
-    const hasLyMtd = lyMtdRev > 0 || lyMtdTx > 0;
-    const hasLyYtd = lyYtdRev > 0;
+    const hasLyMtd  = lyMtdRev > 0 || lyMtdTx > 0;
+    const hasLyYtd  = lyYtdRev > 0;
 
-    const lyWeekNote = hasLyWeek ? `${fmt$(pcwRev)} (${pct(weekRev, pcwRev)})` : "not available — store had no online presence this week last year";
-    const lyMtdNote = hasLyMtd ? `${fmt$(lyMtdRev)} (${pct(mtdRev, lyMtdRev)})` : "not available — no online sales recorded last year";
-    const lyYtdNote = hasLyYtd ? `${fmt$(lyYtdRev)} (${pct(ytdRev, lyYtdRev)})` : "not available — first year of online trading";
+    const lyWeekNote = hasLyWeek
+      ? `${fmt$(pcwRev)} revenue | ${pcwTx} orders | AOV ${fmt$(pcwAov)} | change: ${pct(weekRev, pcwRev)}`
+      : "not available — no online orders recorded this week last year";
+    const lyMtdNote = hasLyMtd
+      ? `${fmt$(lyMtdRev)} | ${lyMtdTx} orders | change: ${pct(mtdRev, lyMtdRev)}`
+      : "not available — no online sales this month last year";
+    const lyYtdNote = hasLyYtd
+      ? `${fmt$(lyYtdRev)} | change: ${pct(ytdRev, lyYtdRev)}`
+      : "not available — first year of online trading";
 
-    const weekLabel = `week ending ${weekEnd.toLocaleDateString("en-AU", { day: "numeric", month: "long", year: "numeric" })}`;
-    const monthLabel = now.toLocaleDateString("en-AU", { month: "long", year: "numeric" });
+    const weekLabel = `week ending ${fmtAestDate(weekEndAest)}`;
+    const monthLabel = fmtAestDate({ year: todayAest.year, month: todayAest.month, day: 1 }, { month: "long", year: "numeric" });
 
     // ─── CLAUDE PROMPT ────────────────────────────────────────────────────────
 
@@ -205,21 +301,27 @@ STORE: ${store_name}
 PERIOD: ${weekLabel}
 CHANNEL: Online only (Shopify)
 
-REVENUE:
-- This week: ${fmt$(weekRev)} vs same week last year: ${lyWeekNote}
-- MTD (${monthLabel}): ${fmt$(mtdRev)} vs LY MTD: ${lyMtdNote}
-- YTD: ${fmt$(ytdRev)} vs LY YTD: ${lyYtdNote}
+WEEKLY PERFORMANCE:
+- Revenue this week: ${fmt$(weekRev)}
+- Orders: ${weekTx} | AOV: ${fmt$(weekAov)}
+- Same week last year: ${lyWeekNote}
 
-TRANSACTIONS & AOV:
-- This week: ${weekTx} orders, AOV ${fmt$(weekAov)}${hasLyWeek ? ` vs LY: ${pcwTx} orders, AOV ${fmt$(pcwAov)}` : " (no LY comparison available)"}
-- MTD: ${mtdTx} orders${hasLyMtd ? ` vs LY MTD: ${lyMtdTx} orders` : " (no LY comparison available)"}
+MONTH TO DATE (${monthLabel}):
+- Revenue: ${fmt$(mtdRev)} | Orders: ${mtdTx}
+- Last year MTD: ${lyMtdNote}
 
-CUSTOMERS (MTD):
+YEAR TO DATE:
+- Revenue: ${fmt$(ytdRev)}
+- Last year YTD: ${lyYtdNote}
+
+CUSTOMER MIX (MTD):
 - New customers: ${newMtd}${hasLyMtd ? ` vs LY: ${newLyMtd}` : ""}
 - Returning customers: ${returningMtd}${hasLyMtd ? ` vs LY: ${returningLyMtd}` : ""}
 
-TOP 5 PRODUCTS THIS WEEK:
-${topProducts.length > 0 ? topProducts.map((p, i) => `${i + 1}. ${p.title} — ${p.quantity} units`).join("\n") : "No orders this week"}
+TOP 5 PRODUCTS THIS WEEK (by units sold):
+${topProducts.length > 0
+  ? topProducts.map((p, i) => `${i + 1}. ${p.title} — ${p.quantity} units`).join("\n")
+  : "No product orders recorded this week"}
 `;
 
     const systemPrompt = `You are Teloskope, a smart weekly business advisor for independent retail store owners.
@@ -229,7 +331,7 @@ Be specific with numbers. Be honest about what looks good and what needs watchin
 Never use bullet points or headers — write in flowing paragraphs only.
 The brief should take about 90 seconds to read aloud.
 IMPORTANT STRUCTURE: Always lead with the headline revenue number for the week (with $ sign) in the very first sentence. Make the cash figure the first thing the owner hears.
-When last year data is marked as "not available", acknowledge this naturally and briefly (e.g. "This is your first year online so we don't have last year to compare against yet") — do not dwell on it or repeat it.
+When last year data is marked as "not available", acknowledge this naturally and briefly — do not dwell on it.
 End with exactly 3 "Options to Explore" — short, specific, actionable ideas based on the data.
 Label them clearly as "Option 1:", "Option 2:", "Option 3:" on new lines.`;
 
@@ -237,7 +339,7 @@ Label them clearly as "Option 1:", "Option 2:", "Option 3:" on new lines.`;
 
 ${dataBlock}
 
-Write the weekly Teloskope brief. Cover: revenue performance, transactions and AOV, new vs returning customer mix, top products, and what it all means together. Then give exactly 3 Options to Explore.`;
+Write the weekly Teloskope brief. Cover: revenue performance and year-on-year comparison, transactions and AOV, new vs returning customer mix, top products, and what it all means together. Then give exactly 3 Options to Explore.`;
 
     console.log("Calling Claude...");
     const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
@@ -251,22 +353,18 @@ Write the weekly Teloskope brief. Cover: revenue performance, transactions and A
     const rawBriefText = claudeResponse.content[0].text;
     console.log("Claude brief generated, chars:", rawBriefText.length);
 
-    // Format brief text as clean HTML for display in Bubble HTML element
+    // Format as HTML for Bubble HTML element
     const briefText = rawBriefText
-      // Convert Option 1/2/3 labels to bold Teloskope-blue headings
       .replace(/Option (1|2|3):/g, '<strong style="color:#0205D3;">Option $1:</strong>')
-      // Wrap each paragraph in <p> tags
       .split(/\n\n+/)
       .map(para => para.trim())
       .filter(para => para.length > 0)
-      .map(para => `<p style="margin-bottom:16px;line-height:1.6;">${para.replace(/\n/g, '<br>')}</p>`)
-      .join('\n');
+      .map(para => `<p style="margin-bottom:16px;line-height:1.6;">${para.replace(/\n/g, "<br>")}</p>`)
+      .join("\n");
 
-    // ─── ELEVENLABS ───────────────────────────────────────────────────────────
+    // ─── ELEVENLABS TTS ───────────────────────────────────────────────────────
 
-    // Send plain text to ElevenLabs (strip HTML tags so voice reads correctly)
-    const plainTextForAudio = rawBriefText;
-
+    // Send rawBriefText (no HTML tags) so voice reads clean prose
     console.log("Calling ElevenLabs...");
     const elResponse = await fetch(
       `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`,
@@ -277,7 +375,7 @@ Write the weekly Teloskope brief. Cover: revenue performance, transactions and A
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          text: plainTextForAudio,
+          text: rawBriefText,
           model_id: "eleven_turbo_v2_5",
           voice_settings: { stability: 0.5, similarity_boost: 0.75 },
         }),
@@ -288,53 +386,45 @@ Write the weekly Teloskope brief. Cover: revenue performance, transactions and A
       throw new Error(`ElevenLabs error ${elResponse.status}: ${await elResponse.text()}`);
     }
 
-    // Get audio as binary buffer
     const audioBuffer = await elResponse.arrayBuffer();
     const audioBlob = Buffer.from(audioBuffer);
     console.log("Audio generated, size:", audioBlob.length, "bytes");
 
     // ─── UPLOAD AUDIO TO BUBBLE FILE STORAGE ─────────────────────────────────
 
-    // FIX: Bubble fileupload expects multipart/form-data, not JSON base64
     console.log("Uploading audio to Bubble...");
-    const fileName = `teloskope-brief-${user_id}-${weekEnd.toISOString().split("T")[0]}.mp3`;
+    const pad = (n) => String(n).padStart(2, "0");
+    const fileName = `teloskope-brief-${user_id}-${weekEndAest.year}-${pad(weekEndAest.month + 1)}-${pad(weekEndAest.day)}.mp3`;
 
     let audioUrl = null;
-
     try {
       const form = new FormData();
       form.append("filename", fileName);
-      form.append(
-        "contents",
-        new Blob([audioBlob], { type: "audio/mpeg" }),
-        fileName
-      );
+      form.append("contents", new Blob([audioBlob], { type: "audio/mpeg" }), fileName);
       form.append("private", "false");
 
       const bubbleUploadResponse = await fetch(
-        `https://teloskope.bubbleapps.io/version-test/fileupload`,
+        "https://teloskope.bubbleapps.io/version-test/fileupload",
         {
           method: "POST",
           headers: {
             Authorization: `Bearer ${process.env.BUBBLE_API_KEY}`,
-            // Do NOT set Content-Type — let fetch set the multipart boundary automatically
+            // No Content-Type header — fetch sets multipart boundary automatically
           },
           body: form,
         }
       );
 
       if (bubbleUploadResponse.ok) {
-        const uploadText = await bubbleUploadResponse.text();
-        audioUrl = uploadText.trim();
+        audioUrl = (await bubbleUploadResponse.text()).trim();
         console.log("Audio uploaded to Bubble CDN:", audioUrl);
       } else {
-        const uploadError = await bubbleUploadResponse.text();
-        console.error("Bubble upload failed:", uploadError);
-        throw new Error(uploadError);
+        const err = await bubbleUploadResponse.text();
+        console.error("Bubble upload failed:", err);
+        throw new Error(err);
       }
     } catch (uploadErr) {
-      // Fallback: use ElevenLabs history URL if Bubble upload fails
-      console.warn("Falling back to ElevenLabs history URL:", uploadErr.message);
+      console.warn("Bubble upload failed, falling back to ElevenLabs URL:", uploadErr.message);
       const historyItemId = elResponse.headers.get("history-item-id");
       audioUrl = historyItemId
         ? `https://api.elevenlabs.io/v1/history/${historyItemId}/audio`
@@ -342,7 +432,7 @@ Write the weekly Teloskope brief. Cover: revenue performance, transactions and A
       console.log("Fallback audio URL:", audioUrl);
     }
 
-    // ─── POST TO BUBBLE ───────────────────────────────────────────────────────
+    // ─── POST BRIEF TO BUBBLE ─────────────────────────────────────────────────
 
     console.log("Posting to Bubble...");
     const bubblePayload = {
@@ -376,7 +466,6 @@ Write the weekly Teloskope brief. Cover: revenue performance, transactions and A
     }
 
     const bubbleData = await bubbleResponse.json();
-    const briefId = bubbleData?.response?.brief_id;
     const briefUrl = brief_page_base_url;
 
     // ─── TWILIO SMS ───────────────────────────────────────────────────────────
@@ -408,10 +497,10 @@ Write the weekly Teloskope brief. Cover: revenue performance, transactions and A
 
     return res.status(200).json({
       success: true,
-      brief_id: briefId,
+      brief_id: bubbleData?.response?.brief_id,
       brief_url: briefUrl,
       audio_url: audioUrl,
-      week_end: weekEnd.toISOString().split("T")[0],
+      week_end: `${weekEndAest.year}-${pad(weekEndAest.month + 1)}-${pad(weekEndAest.day)}`,
       sms_sent_to: user_phone,
     });
 
