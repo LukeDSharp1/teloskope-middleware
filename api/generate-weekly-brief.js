@@ -12,76 +12,48 @@ const TWILIO_PHONE_NUMBER = process.env.TWILIO_PHONE_NUMBER;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const BUBBLE_BASE_URL = "https://teloskope.bubbleapps.io/version-test/api/1.1";
 
-// ─── AEST/AEDT DATE HELPERS ───────────────────────────────────────────────────
-// Vercel runs UTC. All date logic anchored to Australia/Sydney so Mon–Sun week
-// boundaries match exactly what the store owner sees in Shopify.
+// ─── DATE HELPERS (fixed UTC+10 to match Shopify store timezone setting) ──────
+// Shopify store is set to GMT+10:00 Sydney (fixed, no DST).
+// All date boundaries use UTC+10 fixed offset so API windows match the dashboard.
 
-function getAestDateParts(utcDate) {
-  const fmt = new Intl.DateTimeFormat("en-AU", {
-    timeZone: "Australia/Sydney",
-    year: "numeric", month: "2-digit", day: "2-digit", weekday: "short",
-  });
-  const parts = fmt.formatToParts(utcDate);
-  const get = (type) => parts.find((p) => p.type === type).value;
-  const weekdayMap = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+const SHOP_OFFSET_MS = 10 * 60 * 60 * 1000; // UTC+10, fixed
+
+// Get today's date components in UTC+10
+function getShopDateParts(utcDate) {
+  const shopMs = utcDate.getTime() + SHOP_OFFSET_MS;
+  const d = new Date(shopMs);
   return {
-    year: parseInt(get("year")),
-    month: parseInt(get("month")) - 1,
-    day: parseInt(get("day")),
-    dayOfWeek: weekdayMap[get("weekday")],
+    year: d.getUTCFullYear(),
+    month: d.getUTCMonth(),       // 0-indexed
+    day: d.getUTCDate(),
+    dayOfWeek: d.getUTCDay(),     // 0=Sun, 1=Mon … 6=Sat
   };
 }
 
-// Returns the UTC ms offset for Australia/Sydney on a given UTC date
-// e.g. AEDT = +11h = 39600000ms, AEST = +10h = 36000000ms
-function getSydneyOffsetMs(utcDate) {
-  // Format the same instant in both UTC and Sydney, compare the hour difference
-  const utcHour = utcDate.getUTCHours();
-  const sydFmt = new Intl.DateTimeFormat("en-AU", {
-    timeZone: "Australia/Sydney",
-    hour: "2-digit", hour12: false,
-  });
-  const sydHour = parseInt(sydFmt.formatToParts(utcDate).find(p => p.type === "hour").value);
-  // Sydney is always ahead of UTC (UTC+10 or UTC+11)
-  let diff = sydHour - utcHour;
-  if (diff < 0) diff += 24;
-  return diff * 3600 * 1000;
+// Midnight UTC+10 on a given shop-local date, expressed as UTC
+function shopMidnightUtc(year, month, day) {
+  return new Date(Date.UTC(year, month, day, 0, 0, 0) - SHOP_OFFSET_MS);
 }
 
-// Convert an AEST date {year, month (0-indexed), day} to UTC timestamp at Sydney midnight
-function aestMidnightToUtc(year, month, day) {
-  // Start with a UTC date at noon on that day (safely within the day regardless of DST)
-  const noonUtc = new Date(Date.UTC(year, month, day, 12, 0, 0));
-  const offsetMs = getSydneyOffsetMs(noonUtc);
-  // Sydney midnight = UTC noon on same day, minus 12 hours, minus offset
-  // More directly: Sydney midnight UTC = midnight_local - offset
-  // = Date.UTC(y,m,d,0,0,0) - offset... but we must use the offset AT that moment.
-  // Since DST transitions happen at 2am or 3am, noon is always stable.
-  // Sydney midnight = noon UTC - 12h - offset + offset_correction
-  // Simplest reliable method: construct as if UTC, then shift by offset
-  const asIfUtc = new Date(Date.UTC(year, month, day, 0, 0, 0));
-  // Get the Sydney offset at that approximate time
-  const offsetAtMidnight = getSydneyOffsetMs(new Date(asIfUtc.getTime() - offsetMs + 12 * 3600000));
-  return new Date(asIfUtc.getTime() - offsetAtMidnight);
+// 23:59:59.999 UTC+10 on a given shop-local date, expressed as UTC
+function shopEndOfDayUtc(year, month, day) {
+  return new Date(Date.UTC(year, month, day, 23, 59, 59, 999) - SHOP_OFFSET_MS);
 }
 
-// End of day (23:59:59.999) Sydney time as UTC
-function aestEndOfDayToUtc(year, month, day) {
-  return new Date(aestMidnightToUtc(year, month, day).getTime() + 24 * 3600 * 1000 - 1);
+// Add/subtract days, returning a new shop date object
+function shiftDays(d, days) {
+  const shifted = new Date(Date.UTC(d.year, d.month, d.day + days));
+  return { year: shifted.getUTCFullYear(), month: shifted.getUTCMonth(), day: shifted.getUTCDate() };
 }
 
-function aestShiftDays(aestDate, days) {
-  const d = new Date(Date.UTC(aestDate.year, aestDate.month, aestDate.day + days));
-  return { year: d.getUTCFullYear(), month: d.getUTCMonth(), day: d.getUTCDate() };
+// Shift year
+function shiftYear(d, years) {
+  return { ...d, year: d.year + years };
 }
 
-function aestShiftYear(aestDate, years) {
-  return { ...aestDate, year: aestDate.year + years };
-}
-
-function fmtAestDate(aestDate, opts = { day: "numeric", month: "long", year: "numeric" }) {
-  return new Date(Date.UTC(aestDate.year, aestDate.month, aestDate.day))
-    .toLocaleDateString("en-AU", opts);
+// Human-readable date string from shop date object
+function fmtDate(d, opts = { day: "numeric", month: "long", year: "numeric" }) {
+  return new Date(Date.UTC(d.year, d.month, d.day)).toLocaleDateString("en-AU", opts);
 }
 
 const pad = (n) => String(n).padStart(2, "0");
@@ -102,71 +74,50 @@ async function fetchXeroCashBalance(xeroAccessToken, xeroTenantId) {
     );
 
     if (!response.ok) {
-      const errText = await response.text();
-      console.error("Xero BalanceSheet error:", response.status, errText);
+      console.error("Xero BalanceSheet error:", response.status, await response.text());
       return null;
     }
 
     const data = await response.json();
-
-    // Navigate the report rows to find "Cash And Cash Equivalents"
-    // Structure: Reports[0].Rows → find RowType=Section with Title containing "Assets"
-    // then drill into rows to find cash line
     const report = data?.Reports?.[0];
     if (!report) return null;
 
     let cashValue = null;
 
-    for (const section of report.Rows || []) {
-      if (section.RowType !== "Section") continue;
-      for (const row of section.Rows || []) {
-        // Row title or cells may contain "Cash"
+    const searchRows = (rows) => {
+      for (const row of rows || []) {
         if (row.RowType === "Row") {
-          const cells = row.Cells || [];
-          const label = cells[0]?.Value || "";
-          if (label.toLowerCase().includes("cash")) {
-            // cells[1] is current period value
-            const val = parseFloat(cells[1]?.Value?.replace(/,/g, "") || "");
+          const label = (row.Cells?.[0]?.Value || "").toLowerCase();
+          if (label.includes("cash")) {
+            const val = parseFloat((row.Cells?.[1]?.Value || "").replace(/,/g, ""));
             if (!isNaN(val)) {
+              console.log("Xero cash line:", row.Cells?.[0]?.Value, "=", val);
               cashValue = val;
-              console.log("Xero cash line found:", label, "=", val);
-              break;
+              return true;
             }
           }
         }
-        // Also check nested rows (some BS reports nest under a subsection)
-        for (const subRow of row.Rows || []) {
-          const cells = subRow.Cells || [];
-          const label = cells[0]?.Value || "";
-          if (label.toLowerCase().includes("cash")) {
-            const val = parseFloat(cells[1]?.Value?.replace(/,/g, "") || "");
-            if (!isNaN(val)) {
-              cashValue = val;
-              console.log("Xero cash line found (nested):", label, "=", val);
-              break;
-            }
-          }
-        }
-        if (cashValue !== null) break;
+        if (row.Rows && searchRows(row.Rows)) return true;
       }
-      if (cashValue !== null) break;
-    }
+      return false;
+    };
+
+    searchRows(report.Rows);
 
     if (cashValue === null) {
-      console.warn("Xero: could not locate cash line in BalanceSheet — dumping row titles for debug:");
-      for (const section of report.Rows || []) {
-        for (const row of section.Rows || []) {
-          console.warn(" >", (row.Cells?.[0]?.Value || row.Title || "(no label)"));
-          for (const sub of row.Rows || []) {
-            console.warn("   >>", (sub.Cells?.[0]?.Value || "(no label)"));
-          }
+      console.warn("Xero: cash line not found — row titles:");
+      const logRows = (rows, depth = 0) => {
+        for (const row of rows || []) {
+          console.warn(" ".repeat(depth * 2) + (row.Cells?.[0]?.Value || row.Title || row.RowType));
+          if (row.Rows) logRows(row.Rows, depth + 1);
         }
-      }
+      };
+      logRows(report.Rows);
     }
 
     return cashValue;
   } catch (err) {
-    console.error("Xero fetch failed:", err.message);
+    console.error("Xero fetch error:", err.message);
     return null;
   }
 }
@@ -209,63 +160,61 @@ export default async function handler(req, res) {
 
   try {
 
-    // ─── DATE CALCULATIONS (Mon–Sun, AEST/AEDT anchored) ─────────────────────
+    // ─── DATE CALCULATIONS ────────────────────────────────────────────────────
 
     const nowUtc = new Date();
-    const todayAest = getAestDateParts(nowUtc);
+    const today = getShopDateParts(nowUtc);
 
     console.log("UTC now:", nowUtc.toISOString());
-    console.log("AEST today:", todayAest);
+    console.log("Shop date (UTC+10):", today);
 
-    // weekEnd = last Sunday in AEST (yesterday when running Monday)
-    const daysBackToSunday = todayAest.dayOfWeek === 0 ? 7 : todayAest.dayOfWeek;
-    const weekEndAest   = aestShiftDays(todayAest, -daysBackToSunday);
-    const weekStartAest = aestShiftDays(weekEndAest, -6);
+    // weekEnd = last Sunday; weekStart = Mon 6 days before
+    const daysBackToSunday = today.dayOfWeek === 0 ? 7 : today.dayOfWeek;
+    const weekEnd   = shiftDays(today, -daysBackToSunday);
+    const weekStart = shiftDays(weekEnd, -6);
 
     // PCW = same Mon–Sun, one year prior
-    const pcwEndAest   = aestShiftYear(weekEndAest, -1);
-    const pcwStartAest = aestShiftYear(weekStartAest, -1);
+    const pcwEnd   = shiftYear(weekEnd, -1);
+    const pcwStart = shiftYear(weekStart, -1);
 
     // MTD
-    const mtdStartAest   = { year: todayAest.year, month: todayAest.month, day: 1 };
-    const mtdEndAest     = todayAest;
-    const lyMtdStartAest = aestShiftYear(mtdStartAest, -1);
-    const lyMtdEndAest   = aestShiftYear(mtdEndAest, -1);
+    const mtdStart   = { year: today.year, month: today.month, day: 1 };
+    const mtdEnd     = today;
+    const lyMtdStart = shiftYear(mtdStart, -1);
+    const lyMtdEnd   = shiftYear(mtdEnd, -1);
 
     // YTD
-    const ytdStartAest   = { year: todayAest.year, month: 0, day: 1 };
-    const ytdEndAest     = todayAest;
-    const lyYtdStartAest = aestShiftYear(ytdStartAest, -1);
-    const lyYtdEndAest   = aestShiftYear(ytdEndAest, -1);
+    const ytdStart   = { year: today.year, month: 0, day: 1 };
+    const ytdEnd     = today;
+    const lyYtdStart = shiftYear(ytdStart, -1);
+    const lyYtdEnd   = shiftYear(ytdEnd, -1);
 
-    // Convert to UTC for Shopify API
-    const weekStart  = aestMidnightToUtc(weekStartAest.year, weekStartAest.month, weekStartAest.day);
-    const weekEnd    = aestEndOfDayToUtc(weekEndAest.year, weekEndAest.month, weekEndAest.day);
-    const pcwStart   = aestMidnightToUtc(pcwStartAest.year, pcwStartAest.month, pcwStartAest.day);
-    const pcwEnd     = aestEndOfDayToUtc(pcwEndAest.year, pcwEndAest.month, pcwEndAest.day);
-    const mtdStart   = aestMidnightToUtc(mtdStartAest.year, mtdStartAest.month, mtdStartAest.day);
-    const mtdEnd     = aestEndOfDayToUtc(mtdEndAest.year, mtdEndAest.month, mtdEndAest.day);
-    const lyMtdStart = aestMidnightToUtc(lyMtdStartAest.year, lyMtdStartAest.month, lyMtdStartAest.day);
-    const lyMtdEnd   = aestEndOfDayToUtc(lyMtdEndAest.year, lyMtdEndAest.month, lyMtdEndAest.day);
-    const ytdStart   = aestMidnightToUtc(ytdStartAest.year, ytdStartAest.month, ytdStartAest.day);
-    const ytdEnd     = aestEndOfDayToUtc(ytdEndAest.year, ytdEndAest.month, ytdEndAest.day);
-    const lyYtdStart = aestMidnightToUtc(lyYtdStartAest.year, lyYtdStartAest.month, lyYtdStartAest.day);
-    const lyYtdEnd   = aestEndOfDayToUtc(lyYtdEndAest.year, lyYtdEndAest.month, lyYtdEndAest.day);
+    // Convert to UTC timestamps
+    const wS  = shopMidnightUtc(weekStart.year, weekStart.month, weekStart.day);
+    const wE  = shopEndOfDayUtc(weekEnd.year, weekEnd.month, weekEnd.day);
+    const pS  = shopMidnightUtc(pcwStart.year, pcwStart.month, pcwStart.day);
+    const pE  = shopEndOfDayUtc(pcwEnd.year, pcwEnd.month, pcwEnd.day);
+    const mS  = shopMidnightUtc(mtdStart.year, mtdStart.month, mtdStart.day);
+    const mE  = shopEndOfDayUtc(mtdEnd.year, mtdEnd.month, mtdEnd.day);
+    const lmS = shopMidnightUtc(lyMtdStart.year, lyMtdStart.month, lyMtdStart.day);
+    const lmE = shopEndOfDayUtc(lyMtdEnd.year, lyMtdEnd.month, lyMtdEnd.day);
+    const yS  = shopMidnightUtc(ytdStart.year, ytdStart.month, ytdStart.day);
+    const yE  = shopEndOfDayUtc(ytdEnd.year, ytdEnd.month, ytdEnd.day);
+    const lyS = shopMidnightUtc(lyYtdStart.year, lyYtdStart.month, lyYtdStart.day);
+    const lyE = shopEndOfDayUtc(lyYtdEnd.year, lyYtdEnd.month, lyYtdEnd.day);
 
-    console.log("Week:   ", weekStart.toISOString(), "→", weekEnd.toISOString());
-    console.log("PCW:    ", pcwStart.toISOString(), "→", pcwEnd.toISOString());
-    console.log("MTD:    ", mtdStart.toISOString(), "→", mtdEnd.toISOString());
-    console.log("LY MTD: ", lyMtdStart.toISOString(), "→", lyMtdEnd.toISOString());
-    console.log("YTD:    ", ytdStart.toISOString(), "→", ytdEnd.toISOString());
-    console.log("LY YTD: ", lyYtdStart.toISOString(), "→", lyYtdEnd.toISOString());
-
-    const fmt = (d) => d.toISOString();
+    console.log("Week:   ", wS.toISOString(), "→", wE.toISOString());
+    console.log("PCW:    ", pS.toISOString(), "→", pE.toISOString());
+    console.log("MTD:    ", mS.toISOString(), "→", mE.toISOString());
+    console.log("LY MTD: ", lmS.toISOString(), "→", lmE.toISOString());
+    console.log("YTD:    ", yS.toISOString(), "→", yE.toISOString());
+    console.log("LY YTD: ", lyS.toISOString(), "→", lyE.toISOString());
 
     // ─── SHOPIFY HELPERS ──────────────────────────────────────────────────────
 
     const fetchAllOrders = async (start, end, fields = "total_price,created_at") => {
       let orders = [];
-      let url = `https://${shopify_shop_domain}/admin/api/2024-01/orders.json?status=any&financial_status=any&created_at_min=${fmt(start)}&created_at_max=${fmt(end)}&fields=${fields}&limit=250`;
+      let url = `https://${shopify_shop_domain}/admin/api/2024-01/orders.json?status=any&financial_status=any&created_at_min=${start.toISOString()}&created_at_max=${end.toISOString()}&fields=${fields}&limit=250`;
       while (url) {
         const r = await fetch(url, { headers: { "X-Shopify-Access-Token": shopify_access_token } });
         if (!r.ok) throw new Error(`Shopify error ${r.status}: ${await r.text()}`);
@@ -279,12 +228,49 @@ export default async function handler(req, res) {
       return orders;
     };
 
-    const sumRevenue     = (orders) => orders.reduce((s, o) => s + parseFloat(o.total_price || 0), 0);
-    const calcAov        = (orders) => orders.length > 0 ? sumRevenue(orders) / orders.length : 0;
-    const countNewRet    = (orders) => {
+    const sumRevenue  = (orders) => orders.reduce((s, o) => s + parseFloat(o.total_price || 0), 0);
+    const calcAov     = (orders) => orders.length > 0 ? sumRevenue(orders) / orders.length : 0;
+    const countNewRet = (orders) => {
       let newC = 0, ret = 0;
       for (const o of orders) (o.customer?.orders_count ?? 1) <= 1 ? newC++ : ret++;
       return { newC, ret };
+    };
+
+    // Build location stats from shipping addresses
+    const calcLocations = (orders) => {
+      const stateCounts = {};
+      let ausCount = 0;
+      let overseasCount = 0;
+      const ausCodes = new Set(["AU", "AUSTRALIA"]);
+
+      for (const o of orders) {
+        const addr = o.shipping_address;
+        if (!addr) continue;
+        const country = (addr.country_code || addr.country || "").toUpperCase();
+        const isAus = ausCodes.has(country) || country === "";
+        if (isAus) {
+          ausCount++;
+          const state = (addr.province || addr.province_code || "Unknown").trim();
+          stateCounts[state] = (stateCounts[state] || 0) + 1;
+        } else {
+          overseasCount++;
+        }
+      }
+
+      const total = ausCount + overseasCount;
+      const ausPct = total > 0 ? Math.round((ausCount / total) * 100) : 0;
+      const overseaPct = total > 0 ? Math.round((overseasCount / total) * 100) : 0;
+
+      const topStates = Object.entries(stateCounts)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 3)
+        .map(([state, count]) => ({
+          state,
+          count,
+          pct: total > 0 ? Math.round((count / total) * 100) : 0,
+        }));
+
+      return { topStates, ausCount, overseasCount, ausPct, overseaPct, total };
     };
 
     // ─── PARALLEL FETCH: Shopify + Xero ──────────────────────────────────────
@@ -295,25 +281,27 @@ export default async function handler(req, res) {
       weekOrders, pcwOrders,
       mtdOrders, lyMtdOrders,
       ytdOrders, lyYtdOrders,
-      weekOrdersForProducts,
+      weekOrdersDetail,
       xeroCashBalance,
     ] = await Promise.all([
-      fetchAllOrders(weekStart, weekEnd),
-      fetchAllOrders(pcwStart, pcwEnd),
-      fetchAllOrders(mtdStart, mtdEnd, "total_price,created_at,customer"),
-      fetchAllOrders(lyMtdStart, lyMtdEnd, "total_price,created_at,customer"),
-      fetchAllOrders(ytdStart, ytdEnd),
-      fetchAllOrders(lyYtdStart, lyYtdEnd),
-      fetchAllOrders(weekStart, weekEnd, "line_items"),
+      fetchAllOrders(wS, wE),
+      fetchAllOrders(pS, pE),
+      fetchAllOrders(mS, mE, "total_price,created_at,customer"),
+      fetchAllOrders(lmS, lmE, "total_price,created_at,customer"),
+      fetchAllOrders(yS, yE),
+      fetchAllOrders(lyS, lyE),
+      fetchAllOrders(wS, wE, "line_items,shipping_address"),
       (xero_access_token && xero_tenant_id)
         ? fetchXeroCashBalance(xero_access_token, xero_tenant_id)
         : Promise.resolve(null),
     ]);
 
-    console.log("Week orders:", weekOrders.length, "| Revenue:", sumRevenue(weekOrders).toFixed(2));
-    console.log("PCW  orders:", pcwOrders.length,  "| Revenue:", sumRevenue(pcwOrders).toFixed(2));
-    console.log("MTD  orders:", mtdOrders.length,  "| Revenue:", sumRevenue(mtdOrders).toFixed(2));
-    console.log("LY MTD orders:", lyMtdOrders.length, "| Revenue:", sumRevenue(lyMtdOrders).toFixed(2));
+    console.log("Week orders:", weekOrders.length,    "| Revenue:", sumRevenue(weekOrders).toFixed(2));
+    console.log("PCW  orders:", pcwOrders.length,     "| Revenue:", sumRevenue(pcwOrders).toFixed(2));
+    console.log("MTD  orders:", mtdOrders.length,     "| Revenue:", sumRevenue(mtdOrders).toFixed(2));
+    console.log("LY MTD:     ", lyMtdOrders.length,   "| Revenue:", sumRevenue(lyMtdOrders).toFixed(2));
+    console.log("YTD  orders:", ytdOrders.length,     "| Revenue:", sumRevenue(ytdOrders).toFixed(2));
+    console.log("LY YTD:     ", lyYtdOrders.length,   "| Revenue:", sumRevenue(lyYtdOrders).toFixed(2));
     console.log("Xero cash balance:", xeroCashBalance);
 
     // ─── METRIC CALCULATIONS ──────────────────────────────────────────────────
@@ -330,12 +318,12 @@ export default async function handler(req, res) {
     const lyMtdTx  = lyMtdOrders.length;
     const weekAov  = calcAov(weekOrders);
     const pcwAov   = calcAov(pcwOrders);
-    const { newC: newMtd, ret: retMtd } = countNewRet(mtdOrders);
-    const { newC: newLyMtd, ret: retLyMtd } = countNewRet(lyMtdOrders);
+    const { newC: newMtd, ret: retMtd }       = countNewRet(mtdOrders);
+    const { newC: newLyMtd, ret: retLyMtd }   = countNewRet(lyMtdOrders);
 
-    // Top 5 products
+    // Top 5 products + customer locations from detail orders
     const productMap = {};
-    for (const order of weekOrdersForProducts) {
+    for (const order of weekOrdersDetail) {
       for (const item of order.line_items || []) {
         const key = item.product_id;
         if (!productMap[key]) productMap[key] = { title: item.title, quantity: 0 };
@@ -343,6 +331,7 @@ export default async function handler(req, res) {
       }
     }
     const topProducts = Object.values(productMap).sort((a, b) => b.quantity - a.quantity).slice(0, 5);
+    const locations   = calcLocations(weekOrdersDetail);
 
     const pct  = (a, b) => b > 0 ? `${(((a - b) / b) * 100).toFixed(1)}%` : "N/A";
     const fmt$ = (n) => `$${Math.round(n).toLocaleString()}`;
@@ -351,19 +340,18 @@ export default async function handler(req, res) {
     const hasLyMtd  = lyMtdRev > 0 || lyMtdTx > 0;
     const hasLyYtd  = lyYtdRev > 0;
 
-    const weekLabel  = `week ending ${fmtAestDate(weekEndAest)}`;
-    const monthLabel = fmtAestDate({ year: todayAest.year, month: todayAest.month, day: 1 }, { month: "long", year: "numeric" });
-
-    const cashNote = xeroCashBalance !== null && xeroCashBalance !== undefined
+    const weekLabel  = `week ending ${fmtDate(weekEnd)}`;
+    const monthLabel = fmtDate({ year: today.year, month: today.month, day: 1 }, { month: "long", year: "numeric" });
+    const cashNote   = xeroCashBalance !== null && xeroCashBalance !== undefined
       ? fmt$(xeroCashBalance)
       : "not available";
 
-    // ─── BUILD BULLET SUMMARY (for Bubble page display) ───────────────────────
-    // Sections: Revenue → Cash Position → Transactions & AOV →
-    //           New vs Returning → Top 5 Products → Options to Explore
+    // ─── BULLET SUMMARY HTML (page display) ──────────────────────────────────
+    // Order: Revenue → Cash Position → Transactions & AOV →
+    //        New vs Returning → Top 5 Products → Customer Locations → Options
 
     const lyWeekBullet = hasLyWeek
-      ? `Same week last year: ${fmt$(pcwRev)} revenue, ${pcwTx} orders (${pct(weekRev, pcwRev)} change)`
+      ? `Same week last year: ${fmt$(pcwRev)}, ${pcwTx} orders (${pct(weekRev, pcwRev)} change)`
       : "Same week last year: not available — first year online";
     const lyMtdBullet = hasLyMtd
       ? `Last year MTD: ${fmt$(lyMtdRev)} (${pct(mtdRev, lyMtdRev)} change)`
@@ -372,12 +360,18 @@ export default async function handler(req, res) {
       ? `Last year YTD: ${fmt$(lyYtdRev)} (${pct(ytdRev, lyYtdRev)} change)`
       : "Last year YTD: not available — first year online";
 
-    // This will be replaced with Claude's Options section after generation
-    const SUMMARY_PLACEHOLDER = "%%OPTIONS%%";
-
-    const bulletSummaryTop = `<p style="margin-bottom:12px;line-height:1.6;"><strong>Revenue:</strong></p>
+    const locationBullets = locations.total > 0 ? `
+<p style="margin-bottom:12px;line-height:1.6;"><strong>Customer Locations (this week):</strong></p>
 <ul style="margin:0 0 16px 0;padding-left:20px;line-height:1.8;">
-  <li>This week: ${fmt$(weekRev)}${weekTx > 0 ? ` (${weekTx} orders, AOV ${fmt$(weekAov)})` : " (no orders)"}</li>
+  <li>Australia: ${locations.ausPct}% | Overseas: ${locations.overseaPct}%</li>
+  ${locations.topStates.map(s => `<li>${s.state}: ${s.count} order${s.count !== 1 ? "s" : ""} (${s.pct}%)</li>`).join("\n  ")}
+</ul>` : "";
+
+    const OPTIONS_PLACEHOLDER = "%%OPTIONS%%";
+
+    const bulletSummary = `<p style="margin-bottom:12px;line-height:1.6;"><strong>Revenue:</strong></p>
+<ul style="margin:0 0 16px 0;padding-left:20px;line-height:1.8;">
+  <li>This week: ${fmt$(weekRev)}${weekTx > 0 ? ` — ${weekTx} orders, AOV ${fmt$(weekAov)}` : " — no orders"}</li>
   <li>${lyWeekBullet}</li>
   <li>${monthLabel} to date: ${fmt$(mtdRev)} — ${mtdTx} orders</li>
   <li>${lyMtdBullet}</li>
@@ -407,12 +401,20 @@ export default async function handler(req, res) {
 <ul style="margin:0 0 16px 0;padding-left:20px;line-height:1.8;">
 ${topProducts.length > 0
   ? topProducts.map(p => `  <li>${p.title} — ${p.quantity} units</li>`).join("\n")
-  : "  <li>No orders recorded this week</li>"}
+  : "  <li>No orders this week</li>"}
 </ul>
 
-${SUMMARY_PLACEHOLDER}`;
+${locationBullets}
 
-    // ─── CLAUDE DATA BLOCK (for audio prose generation) ───────────────────────
+${OPTIONS_PLACEHOLDER}`;
+
+    // ─── CLAUDE DATA BLOCK ────────────────────────────────────────────────────
+
+    const locationDataBlock = locations.total > 0
+      ? `CUSTOMER LOCATIONS (this week):
+- Australia: ${locations.ausPct}% | Overseas: ${locations.overseaPct}%
+${locations.topStates.map(s => `- ${s.state}: ${s.count} orders (${s.pct}%)`).join("\n")}`
+      : "CUSTOMER LOCATIONS: No shipping data available";
 
     const dataBlock = `
 STORE: ${store_name}
@@ -438,11 +440,15 @@ CUSTOMER MIX (MTD):
 - New: ${newMtd}${hasLyMtd ? ` (LY: ${newLyMtd})` : ""}
 - Returning: ${retMtd}${hasLyMtd ? ` (LY: ${retLyMtd})` : ""}
 
+${locationDataBlock}
+
 TOP 5 PRODUCTS THIS WEEK:
 ${topProducts.length > 0
   ? topProducts.map((p, i) => `${i + 1}. ${p.title} — ${p.quantity} units`).join("\n")
   : "No product orders this week"}
 `;
+
+    // ─── CLAUDE (audio prose) ─────────────────────────────────────────────────
 
     const systemPrompt = `You are Teloskope, a smart weekly business advisor for independent retail store owners.
 Write a warm, direct, insightful weekly audio brief for a store owner to listen to on Monday morning.
@@ -451,7 +457,7 @@ Be specific with numbers. Be honest about what looks good and what needs watchin
 Write in flowing paragraphs only — no bullet points, no headers.
 The brief should take about 90 seconds to read aloud.
 Always lead with the headline revenue number (with $ sign) in the very first sentence.
-Cover: revenue and year-on-year comparison, cash position, transactions and AOV, customer mix, top products, and what it all means.
+Cover: revenue and year-on-year comparison, cash position, transactions and AOV, customer mix, where customers are from, top products, and what it all means together.
 When last year data is not available, acknowledge it briefly and move on.
 End with exactly 3 "Options to Explore" labelled as "Option 1:", "Option 2:", "Option 3:" on new lines.`;
 
@@ -469,28 +475,21 @@ End with exactly 3 "Options to Explore" labelled as "Option 1:", "Option 2:", "O
     const rawBriefText = claudeResponse.content[0].text;
     console.log("Claude brief generated, chars:", rawBriefText.length);
 
-    // ─── BUILD OPTIONS HTML FROM CLAUDE OUTPUT ────────────────────────────────
-    // Extract the Options section from Claude's prose and convert to HTML bullets
-    // for the page summary. The prose version goes to ElevenLabs as-is.
-
+    // Extract Options from Claude output and format as HTML for page summary
     const optionsMatch = rawBriefText.match(/(Option 1:[\s\S]*)/i);
     let optionsHtml = "";
     if (optionsMatch) {
-      const optionsText = optionsMatch[1].trim();
-      // Split into individual options and format as styled paragraphs
-      const optionItems = optionsText
+      const items = optionsMatch[1].trim()
         .split(/(?=Option [123]:)/i)
         .map(s => s.trim())
         .filter(Boolean);
-
       optionsHtml = `<p style="margin-bottom:12px;line-height:1.6;"><strong>Options to Explore:</strong></p>\n` +
-        optionItems.map(item =>
+        items.map(item =>
           `<p style="margin-bottom:12px;line-height:1.6;">${item.replace(/Option ([123]):/i, '<strong style="color:#0205D3;">Option $1:</strong>')}</p>`
         ).join("\n");
     }
 
-    // Assemble final brief_text: bullet summary + Claude's options
-    const briefText = bulletSummaryTop.replace(SUMMARY_PLACEHOLDER, optionsHtml);
+    const briefText = bulletSummary.replace(OPTIONS_PLACEHOLDER, optionsHtml);
 
     // ─── ELEVENLABS TTS (plain prose, no HTML) ────────────────────────────────
 
@@ -516,7 +515,7 @@ End with exactly 3 "Options to Explore" labelled as "Option 1:", "Option 2:", "O
     // ─── UPLOAD AUDIO TO BUBBLE CDN ───────────────────────────────────────────
 
     console.log("Uploading audio to Bubble...");
-    const fileName = `teloskope-brief-${user_id}-${weekEndAest.year}-${pad(weekEndAest.month + 1)}-${pad(weekEndAest.day)}.mp3`;
+    const fileName = `teloskope-brief-${user_id}-${weekEnd.year}-${pad(weekEnd.month + 1)}-${pad(weekEnd.day)}.mp3`;
     let audioUrl = null;
 
     try {
@@ -551,7 +550,7 @@ End with exactly 3 "Options to Explore" labelled as "Option 1:", "Option 2:", "O
       user_id,
       brief_text: briefText,
       audio_url: audioUrl,
-      week_end_date: weekEnd.toISOString(),
+      week_end_date: wE.toISOString(),
       total_week_revenue: Math.round(weekRev * 100) / 100,
       total_pcw_revenue: Math.round(pcwRev * 100) / 100,
       total_mtd_revenue: Math.round(mtdRev * 100) / 100,
@@ -574,7 +573,6 @@ End with exactly 3 "Options to Explore" labelled as "Option 1:", "Option 2:", "O
     });
 
     if (!bubbleRes.ok) throw new Error(`Bubble error ${bubbleRes.status}: ${await bubbleRes.text()}`);
-
     const bubbleData = await bubbleRes.json();
 
     // ─── TWILIO SMS ───────────────────────────────────────────────────────────
@@ -602,7 +600,7 @@ End with exactly 3 "Options to Explore" labelled as "Option 1:", "Option 2:", "O
       brief_id: bubbleData?.response?.brief_id,
       brief_url: brief_page_base_url,
       audio_url: audioUrl,
-      week_end: `${weekEndAest.year}-${pad(weekEndAest.month + 1)}-${pad(weekEndAest.day)}`,
+      week_end: `${weekEnd.year}-${pad(weekEnd.month + 1)}-${pad(weekEnd.day)}`,
       sms_sent_to: user_phone,
     });
 
