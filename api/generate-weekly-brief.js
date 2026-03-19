@@ -48,6 +48,23 @@ function fmtDate(d, opts = { day: "numeric", month: "long", year: "numeric" }) {
 
 const pad = (n) => String(n).padStart(2, "0");
 
+// ─── CLEAN TEXT FOR ELEVENLABS ────────────────────────────────────────────────
+// ElevenLabs reads $9227 naturally. Remove commas from currency, strip markdown,
+// replace punctuation that causes gurgling.
+function cleanForAudio(text) {
+  return text
+    .replace(/\$([0-9,]+)/g, (_, num) => `$${num.replace(/,/g, "")}`) // $9,227 → $9227
+    .replace(/\*\*(.*?)\*\*/g, "$1")   // remove bold **
+    .replace(/\*(.*?)\*/g, "$1")        // remove italic *
+    .replace(/#{1,6}\s/g, "")           // remove markdown headers
+    .replace(/\|/g, " and ")            // pipe → "and"
+    .replace(/–|—/g, ", ")             // em/en dash → comma
+    .replace(/%/g, " percent")          // % → "percent"
+    .replace(/\n{2,}/g, " ")            // multiple newlines → space
+    .replace(/\n/g, " ")                // single newlines → space
+    .trim();
+}
+
 // ─── XERO HELPER ─────────────────────────────────────────────────────────────
 
 async function fetchXeroCashBalance(xeroAccessToken, xeroTenantId) {
@@ -72,7 +89,6 @@ async function fetchXeroCashBalance(xeroAccessToken, xeroTenantId) {
     const report = data?.Reports?.[0];
     if (!report) return null;
 
-    // Search for "Total Bank" first (preferred), then fall back to any "cash" line
     let totalBank = null;
     let cashFallback = null;
 
@@ -86,7 +102,7 @@ async function fetchXeroCashBalance(xeroAccessToken, xeroTenantId) {
               console.log("Xero Total Bank found:", row.Cells?.[0]?.Value, "=", val);
               totalBank = val;
             } else if (label.includes("cash") && cashFallback === null) {
-              console.log("Xero cash fallback found:", row.Cells?.[0]?.Value, "=", val);
+              console.log("Xero cash fallback:", row.Cells?.[0]?.Value, "=", val);
               cashFallback = val;
             }
           }
@@ -96,7 +112,6 @@ async function fetchXeroCashBalance(xeroAccessToken, xeroTenantId) {
     };
 
     searchRows(report.Rows);
-
     const result = totalBank !== null ? totalBank : cashFallback;
     console.log("Xero cash balance result:", result);
     return result;
@@ -319,10 +334,14 @@ export default async function handler(req, res) {
       ? fmt$(xeroCashBalance)
       : "not available";
 
-    // ─── CLAUDE (audio prose only) ────────────────────────────────────────────
+    // First name only for the greeting
+    const firstName = (user_name || "").split(" ")[0] || user_name;
+
+    // ─── CLAUDE PROMPT ────────────────────────────────────────────────────────
 
     const dataBlock = `
 STORE: ${store_name}
+OWNER FIRST NAME: ${firstName}
 PERIOD: ${weekLabel}
 CHANNEL: Online only (Shopify)
 
@@ -362,12 +381,12 @@ Be specific with numbers. Be honest about what looks good and what needs watchin
 Write in flowing paragraphs only — absolutely no bullet points, no headers, no markdown formatting of any kind.
 Do not use asterisks, pound signs, or any special formatting characters.
 The brief should take about 90 seconds to read aloud.
-Always lead with the headline revenue number (with dollar sign) in the very first sentence.
+IMPORTANT: Always open with "Good morning [owner first name]." as the very first words — use the OWNER FIRST NAME from the data. Then immediately follow with the headline revenue figure for the week in the next sentence.
 Cover: revenue and year-on-year comparison, cash position, transactions and AOV, customer mix, where customers are from, top products, and what it all means together.
 When last year data is not available, acknowledge it briefly and move on.
 End with exactly 3 options to explore. Label them clearly as "Option 1:", "Option 2:", "Option 3:" each on a new line, followed by the suggestion as plain prose.`;
 
-    const userPrompt = `Here is the data for ${store_name} for the ${weekLabel}.\n\n${dataBlock}\n\nWrite the Teloskope weekly audio brief. Remember: plain flowing prose only, no markdown, no asterisks, no formatting characters.`;
+    const userPrompt = `Here is the data for ${store_name} for the ${weekLabel}.\n\n${dataBlock}\n\nWrite the Teloskope weekly audio brief. Remember: plain flowing prose only, no markdown, no asterisks, no formatting characters. Start with "Good morning ${firstName}."`;
 
     console.log("Calling Claude...");
     const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
@@ -380,15 +399,11 @@ End with exactly 3 options to explore. Label them clearly as "Option 1:", "Optio
 
     const rawBriefText = claudeResponse.content[0].text;
     console.log("Claude brief generated, chars:", rawBriefText.length);
+    console.log("Claude brief starts with:", rawBriefText.substring(0, 50));
 
-    // Strip any markdown that Claude snuck in anyway, before sending to ElevenLabs
-    const cleanAudioText = rawBriefText
-      .replace(/\*\*(.*?)\*\*/g, "$1")
-      .replace(/\*(.*?)\*/g, "$1")
-      .replace(/#{1,6}\s/g, "")
-      .replace(/\$/g, " dollars ")
-      .replace(/—/g, ", ")
-      .trim();
+    // Clean for ElevenLabs — no commas in numbers, no markdown, no gurgle chars
+    const cleanAudioText = cleanForAudio(rawBriefText);
+    console.log("Clean audio text starts with:", cleanAudioText.substring(0, 50));
 
     // ─── EXTRACT OPTIONS FROM CLAUDE OUTPUT ───────────────────────────────────
 
@@ -400,7 +415,7 @@ End with exactly 3 options to explore. Label them clearly as "Option 1:", "Optio
         .map(s => s.trim())
         .filter(Boolean);
       optionsHtml =
-        `<p style="margin-bottom:12px;line-height:1.6;font-family:Inter,sans-serif;"><strong>Options to Explore:</strong></p>\n` +
+        `<p style="margin-bottom:8px;margin-top:16px;line-height:1.6;font-family:Inter,sans-serif;"><strong>Options to Explore:</strong></p>\n` +
         items.map(item =>
           `<p style="margin-bottom:12px;line-height:1.6;font-family:Inter,sans-serif;">${
             item
@@ -410,11 +425,7 @@ End with exactly 3 options to explore. Label them clearly as "Option 1:", "Optio
         ).join("\n");
     }
 
-    // ─── BUILD HTML BULLET SUMMARY ────────────────────────────────────────────
-    // This is what gets stored in brief_text and displayed on the page.
-    // Structured sections with bold headings and bullet lists.
-    // Order: Revenue → Cash Position → Transactions & AOV →
-    //        New vs Returning → Top 5 Products → Customer Locations → Options
+    // ─── BUILD HTML BULLET SUMMARY (page display) ─────────────────────────────
 
     const li = (text) => `<li style="margin-bottom:6px;">${text}</li>`;
     const section = (title, items) =>
@@ -472,9 +483,8 @@ End with exactly 3 options to explore. Label them clearly as "Option 1:", "Optio
       optionsHtml,
     ].join("\n");
 
-    // ─── DEBUG LOG ────────────────────────────────────────────────────────────
     console.log("brief_text length:", briefText.length);
-    console.log("brief_text preview:", briefText.substring(0, 300));
+    console.log("brief_text preview:", briefText.substring(0, 200));
 
     // ─── ELEVENLABS TTS ───────────────────────────────────────────────────────
 
@@ -500,7 +510,6 @@ End with exactly 3 options to explore. Label them clearly as "Option 1:", "Optio
     // ─── UPLOAD AUDIO TO BUBBLE CDN ───────────────────────────────────────────
 
     console.log("Uploading audio to Bubble...");
-    // Unique filename per run using timestamp to avoid CDN caching old audio
     const runTs = Date.now();
     const fileName = `teloskope-brief-${user_id}-${weekEnd.year}-${pad(weekEnd.month + 1)}-${pad(weekEnd.day)}-${runTs}.mp3`;
     let audioUrl = null;
@@ -568,7 +577,7 @@ End with exactly 3 options to explore. Label them clearly as "Option 1:", "Optio
     // ─── TWILIO SMS ───────────────────────────────────────────────────────────
 
     console.log("Sending SMS...");
-    const smsBody = `Good morning ${user_name}! Your Teloskope Weekly Brief for the ${weekLabel} is ready. Listen here: ${brief_page_base_url}`;
+    const smsBody = `Good morning ${firstName}! Your Teloskope Weekly Brief for the ${weekLabel} is ready. Listen here: ${brief_page_base_url}`;
 
     const twilioRes = await fetch(
       `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`,
