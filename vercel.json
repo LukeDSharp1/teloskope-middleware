@@ -2,7 +2,15 @@
   "crons": [
     {
       "path": "/api/cron-weekly-brief",
-      "schedule": "20 6 * * *"
+      "schedule": "35 6 * * *"
     }
-  ]
+  ],
+  "functions": {
+    "api/cron-weekly-brief.js": {
+      "maxDuration": 300
+    },
+    "api/generate-weekly-brief.js": {
+      "maxDuration": 300
+    }
+  }
 }
