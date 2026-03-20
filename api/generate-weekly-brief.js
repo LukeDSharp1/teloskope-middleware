@@ -48,23 +48,6 @@ function fmtDate(d, opts = { day: "numeric", month: "long", year: "numeric" }) {
 
 const pad = (n) => String(n).padStart(2, "0");
 
-// ─── CLEAN TEXT FOR ELEVENLABS ────────────────────────────────────────────────
-// ElevenLabs reads $9227 naturally. Remove commas from currency, strip markdown,
-// replace punctuation that causes gurgling.
-function cleanForAudio(text) {
-  return text
-    .replace(/\$([0-9,]+)/g, (_, num) => `$${num.replace(/,/g, "")}`) // $9,227 → $9227
-    .replace(/\*\*(.*?)\*\*/g, "$1")   // remove bold **
-    .replace(/\*(.*?)\*/g, "$1")        // remove italic *
-    .replace(/#{1,6}\s/g, "")           // remove markdown headers
-    .replace(/\|/g, " and ")            // pipe → "and"
-    .replace(/–|—/g, ", ")             // em/en dash → comma
-    .replace(/%/g, " percent")          // % → "percent"
-    .replace(/\n{2,}/g, " ")            // multiple newlines → space
-    .replace(/\n/g, " ")                // single newlines → space
-    .trim();
-}
-
 // ─── XERO HELPER ─────────────────────────────────────────────────────────────
 
 async function fetchXeroCashBalance(xeroAccessToken, xeroTenantId) {
@@ -338,6 +321,9 @@ export default async function handler(req, res) {
     const firstName = (user_name || "").split(" ")[0] || user_name;
 
     // ─── CLAUDE PROMPT ────────────────────────────────────────────────────────
+    // Claude writes the audio script with numbers in full words for clean TTS.
+    // The data block uses formatted numbers ($9,227) for Claude to read and
+    // convert — Claude's job is to translate these into spoken word form.
 
     const dataBlock = `
 STORE: ${store_name}
@@ -379,14 +365,27 @@ Write a warm, direct, insightful weekly audio brief for a store owner to listen 
 Write in a conversational Australian tone — like a trusted business advisor, not a corporate report.
 Be specific with numbers. Be honest about what looks good and what needs watching.
 Write in flowing paragraphs only — absolutely no bullet points, no headers, no markdown formatting of any kind.
-Do not use asterisks, pound signs, or any special formatting characters.
+Do not use any symbols, asterisks, dollar signs, percent signs, or special characters of any kind.
+
+CRITICAL — NUMBER FORMATTING FOR AUDIO:
+This script will be read aloud by a text-to-speech voice. You must write ALL numbers in full spoken words so they sound natural when read aloud. Follow these rules strictly:
+- Dollar amounts: write as words e.g. "nine thousand two hundred and twenty seven dollars" not "$9,227" or "9227 dollars"
+- Percentages: write as words e.g. "thirteen point three percent" not "13.3%"
+- Order counts: write as words e.g. "eighteen orders" not "18 orders"
+- AOV: write as words e.g. "five hundred and thirteen dollars" not "$513"
+- All other numbers: write in full words
+
 The brief should take about 90 seconds to read aloud.
-IMPORTANT: Always open with "Good morning [owner first name]." as the very first words — use the OWNER FIRST NAME from the data. Then immediately follow with the headline revenue figure for the week in the next sentence.
+Always open with "Good morning [owner first name]." as the very first words. Then immediately lead with the headline revenue figure for the week in full words in the next sentence.
 Cover: revenue and year-on-year comparison, cash position, transactions and AOV, customer mix, where customers are from, top products, and what it all means together.
 When last year data is not available, acknowledge it briefly and move on.
 End with exactly 3 options to explore. Label them clearly as "Option 1:", "Option 2:", "Option 3:" each on a new line, followed by the suggestion as plain prose.`;
 
-    const userPrompt = `Here is the data for ${store_name} for the ${weekLabel}.\n\n${dataBlock}\n\nWrite the Teloskope weekly audio brief. Remember: plain flowing prose only, no markdown, no asterisks, no formatting characters. Start with "Good morning ${firstName}."`;
+    const userPrompt = `Here is the data for ${store_name} for the ${weekLabel}.
+
+${dataBlock}
+
+Write the Teloskope weekly audio brief. Remember: all numbers must be written in full spoken words. No symbols, no dollar signs, no percent signs. Start with "Good morning ${firstName}."`;
 
     console.log("Calling Claude...");
     const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
@@ -399,11 +398,7 @@ End with exactly 3 options to explore. Label them clearly as "Option 1:", "Optio
 
     const rawBriefText = claudeResponse.content[0].text;
     console.log("Claude brief generated, chars:", rawBriefText.length);
-    console.log("Claude brief starts with:", rawBriefText.substring(0, 50));
-
-    // Clean for ElevenLabs — no commas in numbers, no markdown, no gurgle chars
-    const cleanAudioText = cleanForAudio(rawBriefText);
-    console.log("Clean audio text starts with:", cleanAudioText.substring(0, 50));
+    console.log("Brief starts with:", rawBriefText.substring(0, 80));
 
     // ─── EXTRACT OPTIONS FROM CLAUDE OUTPUT ───────────────────────────────────
 
@@ -418,14 +413,13 @@ End with exactly 3 options to explore. Label them clearly as "Option 1:", "Optio
         `<p style="margin-bottom:8px;margin-top:16px;line-height:1.6;font-family:Inter,sans-serif;"><strong>Options to Explore:</strong></p>\n` +
         items.map(item =>
           `<p style="margin-bottom:12px;line-height:1.6;font-family:Inter,sans-serif;">${
-            item
-              .replace(/\*\*(.*?)\*\*/g, "$1")
-              .replace(/Option ([123]):/i, '<strong style="color:#0205D3;">Option $1:</strong>')
+            item.replace(/Option ([123]):/i, '<strong style="color:#0205D3;">Option $1:</strong>')
           }</p>`
         ).join("\n");
     }
 
     // ─── BUILD HTML BULLET SUMMARY (page display) ─────────────────────────────
+    // Page display uses formatted numbers ($9,227) — only the audio uses words.
 
     const li = (text) => `<li style="margin-bottom:6px;">${text}</li>`;
     const section = (title, items) =>
@@ -487,6 +481,8 @@ End with exactly 3 options to explore. Label them clearly as "Option 1:", "Optio
     console.log("brief_text preview:", briefText.substring(0, 200));
 
     // ─── ELEVENLABS TTS ───────────────────────────────────────────────────────
+    // Send rawBriefText directly — Claude has already written numbers as words.
+    // No cleaning needed.
 
     console.log("Calling ElevenLabs...");
     const elResponse = await fetch(
@@ -495,7 +491,7 @@ End with exactly 3 options to explore. Label them clearly as "Option 1:", "Optio
         method: "POST",
         headers: { "xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json" },
         body: JSON.stringify({
-          text: cleanAudioText,
+          text: rawBriefText,
           model_id: "eleven_turbo_v2_5",
           voice_settings: { stability: 0.5, similarity_boost: 0.75 },
         }),
