@@ -48,20 +48,98 @@ function fmtDate(d, opts = { day: "numeric", month: "long", year: "numeric" }) {
 
 const pad = (n) => String(n).padStart(2, "0");
 
-// ─── XERO HELPER ─────────────────────────────────────────────────────────────
+// ─── XERO HELPERS ─────────────────────────────────────────────────────────────
 
-async function fetchXeroCashBalance(xeroAccessToken, xeroTenantId) {
+// Refresh Xero token and save new tokens back to Bubble
+async function refreshXeroToken(xeroRefreshToken, xeroConnectionId) {
   try {
+    console.log("Refreshing Xero token...");
+    const clientId = process.env.XERO_CLIENT_ID;
+    const clientSecret = process.env.XERO_CLIENT_SECRET;
+    const credentials = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
+
+    const refreshRes = await fetch("https://identity.xero.com/connect/token", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Authorization: `Basic ${credentials}`,
+      },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: xeroRefreshToken,
+      }),
+    });
+
+    if (!refreshRes.ok) {
+      const err = await refreshRes.text();
+      console.error("Xero token refresh failed:", refreshRes.status, err);
+      return null;
+    }
+
+    const tokens = await refreshRes.json();
+    console.log("Xero token refreshed successfully");
+
+    // Save new tokens back to Bubble xero_connection record
+    const expiresAt = new Date(Date.now() + (tokens.expires_in - 120) * 1000).toISOString();
+    const bubblePatch = await fetch(
+      `${BUBBLE_BASE_URL}/obj/xero_connection/${xeroConnectionId}`,
+      {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${process.env.BUBBLE_API_KEY}`,
+        },
+        body: JSON.stringify({
+          xero_access_token: tokens.access_token,
+          xero_refresh_token: tokens.refresh_token,
+          token_expires_at: expiresAt,
+        }),
+      }
+    );
+
+    if (!bubblePatch.ok) {
+      console.error("Failed to save refreshed Xero token to Bubble:", await bubblePatch.text());
+    } else {
+      console.log("New Xero tokens saved to Bubble");
+    }
+
+    return tokens.access_token;
+  } catch (err) {
+    console.error("Xero refresh error:", err.message);
+    return null;
+  }
+}
+
+// Fetch Xero cash balance, with automatic token refresh on 401
+async function fetchXeroCashBalance(xeroAccessToken, xeroTenantId, xeroRefreshToken, xeroConnectionId) {
+  const doFetch = async (token) => {
     const response = await fetch(
       "https://api.xero.com/api.xro/2.0/Reports/BalanceSheet",
       {
         headers: {
-          Authorization: `Bearer ${xeroAccessToken}`,
+          Authorization: `Bearer ${token}`,
           "Xero-tenant-id": xeroTenantId,
           Accept: "application/json",
         },
       }
     );
+    return response;
+  };
+
+  try {
+    let response = await doFetch(xeroAccessToken);
+
+    // If token expired, refresh and retry
+    if (response.status === 401 && xeroRefreshToken && xeroConnectionId) {
+      console.log("Xero token expired — refreshing...");
+      const newToken = await refreshXeroToken(xeroRefreshToken, xeroConnectionId);
+      if (newToken) {
+        response = await doFetch(newToken);
+      } else {
+        console.error("Xero token refresh failed — skipping cash balance");
+        return null;
+      }
+    }
 
     if (!response.ok) {
       console.error("Xero BalanceSheet error:", response.status, await response.text());
@@ -115,7 +193,9 @@ export default async function handler(req, res) {
     shopify_shop_domain,
     shopify_access_token,
     xero_access_token,
+    xero_refresh_token,
     xero_tenant_id,
+    xero_connection_id,
     bubble_secret_key,
     user_id,
     user_name,
@@ -134,7 +214,7 @@ export default async function handler(req, res) {
       brief_id: "test_brief_id",
       brief_url: "https://teloskope.bubbleapps.io/version-test/brief/test",
       audio_url: "https://api.elevenlabs.io/v1/history/test/audio",
-      week_end: "2026-03-15",
+      week_end: "2026-03-22",
       sms_sent_to: "+61400000000",
     });
   }
@@ -264,7 +344,7 @@ export default async function handler(req, res) {
       fetchAllOrders(lyS, lyE),
       fetchAllOrders(wS, wE, "line_items,shipping_address"),
       (xero_access_token && xero_tenant_id)
-        ? fetchXeroCashBalance(xero_access_token, xero_tenant_id)
+        ? fetchXeroCashBalance(xero_access_token, xero_tenant_id, xero_refresh_token, xero_connection_id)
         : Promise.resolve(null),
     ]);
 
@@ -317,13 +397,9 @@ export default async function handler(req, res) {
       ? fmt$(xeroCashBalance)
       : "not available";
 
-    // First name only for the greeting
     const firstName = (user_name || "").split(" ")[0] || user_name;
 
     // ─── CLAUDE PROMPT ────────────────────────────────────────────────────────
-    // Claude writes the audio script with numbers in full words for clean TTS.
-    // The data block uses formatted numbers ($9,227) for Claude to read and
-    // convert — Claude's job is to translate these into spoken word form.
 
     const dataBlock = `
 STORE: ${store_name}
@@ -369,7 +445,7 @@ Do not use any symbols, asterisks, dollar signs, percent signs, or special chara
 
 CRITICAL — NUMBER FORMATTING FOR AUDIO:
 This script will be read aloud by a text-to-speech voice. You must write ALL numbers in full spoken words so they sound natural when read aloud. Follow these rules strictly:
-- Dollar amounts: write as words e.g. "nine thousand two hundred and twenty seven dollars" not "$9,227" or "9227 dollars"
+- Dollar amounts: write as words e.g. "nine thousand two hundred and twenty seven dollars" not "$9,227"
 - Percentages: write as words e.g. "thirteen point three percent" not "13.3%"
 - Order counts: write as words e.g. "eighteen orders" not "18 orders"
 - AOV: write as words e.g. "five hundred and thirteen dollars" not "$513"
@@ -419,7 +495,6 @@ Write the Teloskope weekly audio brief. Remember: all numbers must be written in
     }
 
     // ─── BUILD HTML BULLET SUMMARY (page display) ─────────────────────────────
-    // Page display uses formatted numbers ($9,227) — only the audio uses words.
 
     const li = (text) => `<li style="margin-bottom:6px;">${text}</li>`;
     const section = (title, items) =>
@@ -481,8 +556,6 @@ Write the Teloskope weekly audio brief. Remember: all numbers must be written in
     console.log("brief_text preview:", briefText.substring(0, 200));
 
     // ─── ELEVENLABS TTS ───────────────────────────────────────────────────────
-    // Send rawBriefText directly — Claude has already written numbers as words.
-    // No cleaning needed.
 
     console.log("Calling ElevenLabs...");
     const elResponse = await fetch(
@@ -523,7 +596,9 @@ Write the Teloskope weekly audio brief. Remember: all numbers must be written in
       });
 
       if (uploadRes.ok) {
-        audioUrl = (await uploadRes.text()).trim();
+        const rawUrl = (await uploadRes.text()).trim();
+        // Ensure full https:// URL — Bubble returns protocol-relative //cdn... URLs
+        audioUrl = rawUrl.startsWith("//") ? `https:${rawUrl}` : rawUrl;
         console.log("Audio uploaded to Bubble CDN:", audioUrl);
       } else {
         throw new Error(await uploadRes.text());
