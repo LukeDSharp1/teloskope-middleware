@@ -48,9 +48,16 @@ function fmtDate(d, opts = { day: "numeric", month: "long", year: "numeric" }) {
 
 const pad = (n) => String(n).padStart(2, "0");
 
+// ─── BUBBLE CDN URL HELPER ────────────────────────────────────────────────────
+// Bubble fileupload returns the URL wrapped in quotes e.g. "//cdn.bubble.io/..."
+// Strip quotes and ensure full https:// protocol.
+function cleanBubbleUrl(raw) {
+  const stripped = raw.trim().replace(/^"|"$/g, ""); // remove leading/trailing quotes
+  return stripped.startsWith("//") ? `https:${stripped}` : stripped;
+}
+
 // ─── XERO HELPERS ─────────────────────────────────────────────────────────────
 
-// Refresh Xero token and save new tokens back to Bubble
 async function refreshXeroToken(xeroRefreshToken, xeroConnectionId) {
   try {
     console.log("Refreshing Xero token...");
@@ -71,8 +78,7 @@ async function refreshXeroToken(xeroRefreshToken, xeroConnectionId) {
     });
 
     if (!refreshRes.ok) {
-      const err = await refreshRes.text();
-      console.error("Xero token refresh failed:", refreshRes.status, err);
+      console.error("Xero token refresh failed:", refreshRes.status, await refreshRes.text());
       return null;
     }
 
@@ -110,26 +116,20 @@ async function refreshXeroToken(xeroRefreshToken, xeroConnectionId) {
   }
 }
 
-// Fetch Xero cash balance, with automatic token refresh on 401
 async function fetchXeroCashBalance(xeroAccessToken, xeroTenantId, xeroRefreshToken, xeroConnectionId) {
   const doFetch = async (token) => {
-    const response = await fetch(
-      "https://api.xero.com/api.xro/2.0/Reports/BalanceSheet",
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Xero-tenant-id": xeroTenantId,
-          Accept: "application/json",
-        },
-      }
-    );
-    return response;
+    return fetch("https://api.xero.com/api.xro/2.0/Reports/BalanceSheet", {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Xero-tenant-id": xeroTenantId,
+        Accept: "application/json",
+      },
+    });
   };
 
   try {
     let response = await doFetch(xeroAccessToken);
 
-    // If token expired, refresh and retry
     if (response.status === 401 && xeroRefreshToken && xeroConnectionId) {
       console.log("Xero token expired — refreshing...");
       const newToken = await refreshXeroToken(xeroRefreshToken, xeroConnectionId);
@@ -596,9 +596,9 @@ Write the Teloskope weekly audio brief. Remember: all numbers must be written in
       });
 
       if (uploadRes.ok) {
-        const rawUrl = (await uploadRes.text()).trim();
-        // Ensure full https:// URL — Bubble returns protocol-relative //cdn... URLs
-        audioUrl = rawUrl.startsWith("//") ? `https:${rawUrl}` : rawUrl;
+        // Bubble returns protocol-relative URL wrapped in quotes e.g. "//cdn.bubble.io/..."
+        // Strip quotes and ensure https:// protocol
+        audioUrl = cleanBubbleUrl(await uploadRes.text());
         console.log("Audio uploaded to Bubble CDN:", audioUrl);
       } else {
         throw new Error(await uploadRes.text());
@@ -634,6 +634,7 @@ Write the Teloskope weekly audio brief. Remember: all numbers must be written in
     };
 
     console.log("Bubble payload brief_text length:", bubblePayload.brief_text.length);
+    console.log("Audio URL being stored:", audioUrl);
 
     const bubbleRes = await fetch(`${BUBBLE_BASE_URL}/wf/ingest_weekly_brief`, {
       method: "POST",
