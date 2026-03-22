@@ -52,7 +52,7 @@ const pad = (n) => String(n).padStart(2, "0");
 // Bubble fileupload returns the URL wrapped in quotes e.g. "//cdn.bubble.io/..."
 // Strip quotes and ensure full https:// protocol.
 function cleanBubbleUrl(raw) {
-  const stripped = raw.trim().replace(/^"|"$/g, ""); // remove leading/trailing quotes
+  const stripped = raw.trim().replace(/^"|"$/g, "");
   return stripped.startsWith("//") ? `https:${stripped}` : stripped;
 }
 
@@ -85,7 +85,6 @@ async function refreshXeroToken(xeroRefreshToken, xeroConnectionId) {
     const tokens = await refreshRes.json();
     console.log("Xero token refreshed successfully");
 
-    // Save new tokens back to Bubble xero_connection record
     const expiresAt = new Date(Date.now() + (tokens.expires_in - 120) * 1000).toISOString();
     const bubblePatch = await fetch(
       `${BUBBLE_BASE_URL}/obj/xero_connection/${xeroConnectionId}`,
@@ -283,11 +282,28 @@ export default async function handler(req, res) {
       return orders;
     };
 
-    const sumRevenue  = (orders) => orders.reduce((s, o) => s + parseFloat(o.total_price || 0), 0);
-    const calcAov     = (orders) => orders.length > 0 ? sumRevenue(orders) / orders.length : 0;
+    const sumRevenue = (orders) => orders.reduce((s, o) => s + parseFloat(o.total_price || 0), 0);
+    const calcAov    = (orders) => orders.length > 0 ? sumRevenue(orders) / orders.length : 0;
+
+    // ─── NEW VS RETURNING CUSTOMER LOGIC ─────────────────────────────────────
+    // A customer is NEW if their orders_count at time of this order was 1
+    // (meaning this was their very first order ever with the store).
+    // A customer is RETURNING if orders_count > 1 at time of order.
+    // We fetch customer fields explicitly to ensure orders_count is returned.
     const countNewRet = (orders) => {
       let newC = 0, ret = 0;
-      for (const o of orders) (o.customer?.orders_count ?? 1) <= 1 ? newC++ : ret++;
+      for (const o of orders) {
+        const ordersCount = o.customer?.orders_count;
+        if (ordersCount === undefined || ordersCount === null) {
+          // Guest checkout or missing customer data — count as new
+          newC++;
+        } else if (ordersCount <= 1) {
+          newC++;
+        } else {
+          ret++;
+        }
+      }
+      console.log(`countNewRet: new=${newC}, returning=${ret}, total=${orders.length}`);
       return { newC, ret };
     };
 
@@ -329,6 +345,9 @@ export default async function handler(req, res) {
 
     console.log("Fetching Shopify data + Xero...");
 
+    // MTD orders fetch includes full customer object to get orders_count
+    const MTD_FIELDS = "total_price,created_at,customer";
+
     const [
       weekOrders, pcwOrders,
       mtdOrders, lyMtdOrders,
@@ -338,8 +357,8 @@ export default async function handler(req, res) {
     ] = await Promise.all([
       fetchAllOrders(wS, wE),
       fetchAllOrders(pS, pE),
-      fetchAllOrders(mS, mE, "total_price,created_at,customer"),
-      fetchAllOrders(lmS, lmE, "total_price,created_at,customer"),
+      fetchAllOrders(mS, mE, MTD_FIELDS),
+      fetchAllOrders(lmS, lmE, MTD_FIELDS),
       fetchAllOrders(yS, yE),
       fetchAllOrders(lyS, lyE),
       fetchAllOrders(wS, wE, "line_items,shipping_address"),
@@ -355,6 +374,13 @@ export default async function handler(req, res) {
     console.log("YTD  orders:", ytdOrders.length,  "| Revenue:", sumRevenue(ytdOrders).toFixed(2));
     console.log("LY YTD:     ", lyYtdOrders.length, "| Revenue:", sumRevenue(lyYtdOrders).toFixed(2));
     console.log("Xero cash balance:", xeroCashBalance);
+
+    // Sample orders_count to verify data is coming through
+    if (mtdOrders.length > 0) {
+      console.log("Sample MTD orders_count values:",
+        mtdOrders.slice(0, 3).map(o => o.customer?.orders_count ?? "undefined")
+      );
+    }
 
     // ─── CALCULATIONS ─────────────────────────────────────────────────────────
 
@@ -423,8 +449,8 @@ YEAR TO DATE:
 - Last year YTD: ${hasLyYtd ? `${fmt$(lyYtdRev)} (${pct(ytdRev, lyYtdRev)} change)` : "not available — first year online"}
 
 CUSTOMER MIX (MTD):
-- New: ${newMtd}${hasLyMtd ? ` (LY: ${newLyMtd})` : ""}
-- Returning: ${retMtd}${hasLyMtd ? ` (LY: ${retLyMtd})` : ""}
+- New customers (first ever order): ${newMtd}${hasLyMtd ? ` vs LY: ${newLyMtd}` : ""}
+- Returning customers (2+ lifetime orders): ${retMtd}${hasLyMtd ? ` vs LY: ${retLyMtd}` : ""}
 
 CUSTOMER LOCATIONS (this week):
 - Australia: ${locations.ausPct}% | Overseas: ${locations.overseaPct}%
@@ -455,19 +481,20 @@ The brief should take about 90 seconds to read aloud.
 Always open with "Good morning [owner first name]." as the very first words. Then immediately lead with the headline revenue figure for the week in full words in the next sentence.
 Cover: revenue and year-on-year comparison, cash position, transactions and AOV, customer mix, where customers are from, top products, and what it all means together.
 When last year data is not available, acknowledge it briefly and move on.
-End with exactly 3 options to explore. Label them clearly as "Option 1:", "Option 2:", "Option 3:" each on a new line, followed by the suggestion as plain prose.`;
+End with exactly 3 options to explore. Label them clearly as "Option 1:", "Option 2:", "Option 3:" each on a new line, followed by the suggestion as plain prose.
+After the 3 options, close with this exact sign-off on a new line: "That's your Teloskope brief for the week. Have a great Monday, and I'll be back next week with your next update."`;
 
     const userPrompt = `Here is the data for ${store_name} for the ${weekLabel}.
 
 ${dataBlock}
 
-Write the Teloskope weekly audio brief. Remember: all numbers must be written in full spoken words. No symbols, no dollar signs, no percent signs. Start with "Good morning ${firstName}."`;
+Write the Teloskope weekly audio brief. Remember: all numbers must be written in full spoken words. No symbols, no dollar signs, no percent signs. Start with "Good morning ${firstName}." and end with the Teloskope sign-off.`;
 
     console.log("Calling Claude...");
     const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
     const claudeResponse = await anthropic.messages.create({
       model: "claude-sonnet-4-20250514",
-      max_tokens: 1024,
+      max_tokens: 1200,
       system: systemPrompt,
       messages: [{ role: "user", content: userPrompt }],
     });
@@ -475,6 +502,7 @@ Write the Teloskope weekly audio brief. Remember: all numbers must be written in
     const rawBriefText = claudeResponse.content[0].text;
     console.log("Claude brief generated, chars:", rawBriefText.length);
     console.log("Brief starts with:", rawBriefText.substring(0, 80));
+    console.log("Brief ends with:", rawBriefText.substring(rawBriefText.length - 80));
 
     // ─── EXTRACT OPTIONS FROM CLAUDE OUTPUT ───────────────────────────────────
 
@@ -596,8 +624,6 @@ Write the Teloskope weekly audio brief. Remember: all numbers must be written in
       });
 
       if (uploadRes.ok) {
-        // Bubble returns protocol-relative URL wrapped in quotes e.g. "//cdn.bubble.io/..."
-        // Strip quotes and ensure https:// protocol
         audioUrl = cleanBubbleUrl(await uploadRes.text());
         console.log("Audio uploaded to Bubble CDN:", audioUrl);
       } else {
