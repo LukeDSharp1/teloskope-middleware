@@ -49,7 +49,7 @@ function fmtDate(d, opts = { day: "numeric", month: "long", year: "numeric" }) {
 const pad = (n) => String(n).padStart(2, "0");
 
 // ─── BUBBLE CDN URL HELPER ────────────────────────────────────────────────────
-// Bubble fileupload returns the URL wrapped in quotes e.g. "//cdn.bubble.io/..."
+// Bubble fileupload returns URL wrapped in quotes e.g. "//cdn.bubble.io/..."
 // Strip quotes and ensure full https:// protocol.
 function cleanBubbleUrl(raw) {
   const stripped = raw.trim().replace(/^"|"$/g, "");
@@ -285,28 +285,6 @@ export default async function handler(req, res) {
     const sumRevenue = (orders) => orders.reduce((s, o) => s + parseFloat(o.total_price || 0), 0);
     const calcAov    = (orders) => orders.length > 0 ? sumRevenue(orders) / orders.length : 0;
 
-    // ─── NEW VS RETURNING CUSTOMER LOGIC ─────────────────────────────────────
-    // A customer is NEW if their orders_count at time of this order was 1
-    // (meaning this was their very first order ever with the store).
-    // A customer is RETURNING if orders_count > 1 at time of order.
-    // We fetch customer fields explicitly to ensure orders_count is returned.
-    const countNewRet = (orders) => {
-      let newC = 0, ret = 0;
-      for (const o of orders) {
-        const ordersCount = o.customer?.orders_count;
-        if (ordersCount === undefined || ordersCount === null) {
-          // Guest checkout or missing customer data — count as new
-          newC++;
-        } else if (ordersCount <= 1) {
-          newC++;
-        } else {
-          ret++;
-        }
-      }
-      console.log(`countNewRet: new=${newC}, returning=${ret}, total=${orders.length}`);
-      return { newC, ret };
-    };
-
     const calcLocations = (orders) => {
       const stateCounts = {};
       let ausCount = 0, overseasCount = 0;
@@ -345,13 +323,15 @@ export default async function handler(req, res) {
 
     console.log("Fetching Shopify data + Xero...");
 
-    // MTD orders fetch includes full customer object to get orders_count
-    const MTD_FIELDS = "total_price,created_at,customer";
+    // Fetch customer.id for MTD orders and pre-MTD YTD orders to determine new vs returning
+    const MTD_FIELDS     = "total_price,created_at,customer";
+    const PRE_MTD_FIELDS = "created_at,customer";
 
     const [
       weekOrders, pcwOrders,
       mtdOrders, lyMtdOrders,
       ytdOrders, lyYtdOrders,
+      preMtdOrders, preLyMtdOrders,
       weekOrdersDetail,
       xeroCashBalance,
     ] = await Promise.all([
@@ -361,6 +341,9 @@ export default async function handler(req, res) {
       fetchAllOrders(lmS, lmE, MTD_FIELDS),
       fetchAllOrders(yS, yE),
       fetchAllOrders(lyS, lyE),
+      // Orders before MTD start (from Jan 1 to MTD start) to identify returning customers
+      fetchAllOrders(yS, new Date(mS.getTime() - 1), PRE_MTD_FIELDS),
+      fetchAllOrders(lyS, new Date(lmS.getTime() - 1), PRE_MTD_FIELDS),
       fetchAllOrders(wS, wE, "line_items,shipping_address"),
       (xero_access_token && xero_tenant_id)
         ? fetchXeroCashBalance(xero_access_token, xero_tenant_id, xero_refresh_token, xero_connection_id)
@@ -373,14 +356,38 @@ export default async function handler(req, res) {
     console.log("LY MTD:     ", lyMtdOrders.length, "| Revenue:", sumRevenue(lyMtdOrders).toFixed(2));
     console.log("YTD  orders:", ytdOrders.length,  "| Revenue:", sumRevenue(ytdOrders).toFixed(2));
     console.log("LY YTD:     ", lyYtdOrders.length, "| Revenue:", sumRevenue(lyYtdOrders).toFixed(2));
+    console.log("Pre-MTD orders:", preMtdOrders.length);
     console.log("Xero cash balance:", xeroCashBalance);
 
-    // Sample orders_count to verify data is coming through
-    if (mtdOrders.length > 0) {
-      console.log("Sample MTD orders_count values:",
-        mtdOrders.slice(0, 3).map(o => o.customer?.orders_count ?? "undefined")
-      );
-    }
+    // ─── NEW VS RETURNING CUSTOMER LOGIC ─────────────────────────────────────
+    // A customer is RETURNING if they placed any order before the MTD start date.
+    // We use the pre-MTD order set to build a lookup of known customer IDs.
+    // This avoids relying on orders_count which Shopify doesn't return reliably.
+
+    const preMtdCustomerIds = new Set(
+      preMtdOrders
+        .filter(o => o.customer?.id)
+        .map(o => String(o.customer.id))
+    );
+
+    const preLyMtdCustomerIds = new Set(
+      preLyMtdOrders
+        .filter(o => o.customer?.id)
+        .map(o => String(o.customer.id))
+    );
+
+    const countNewRet = (orders, priorCustomerIds) => {
+      let newC = 0, ret = 0;
+      for (const o of orders) {
+        if (!o.customer?.id) {
+          newC++; // guest checkout
+          continue;
+        }
+        priorCustomerIds.has(String(o.customer.id)) ? ret++ : newC++;
+      }
+      console.log(`countNewRet: new=${newC}, returning=${ret}, total=${orders.length}`);
+      return { newC, ret };
+    };
 
     // ─── CALCULATIONS ─────────────────────────────────────────────────────────
 
@@ -396,8 +403,9 @@ export default async function handler(req, res) {
     const lyMtdTx  = lyMtdOrders.length;
     const weekAov  = calcAov(weekOrders);
     const pcwAov   = calcAov(pcwOrders);
-    const { newC: newMtd, ret: retMtd }     = countNewRet(mtdOrders);
-    const { newC: newLyMtd, ret: retLyMtd } = countNewRet(lyMtdOrders);
+
+    const { newC: newMtd, ret: retMtd }     = countNewRet(mtdOrders, preMtdCustomerIds);
+    const { newC: newLyMtd, ret: retLyMtd } = countNewRet(lyMtdOrders, preLyMtdCustomerIds);
 
     const productMap = {};
     for (const order of weekOrdersDetail) {
@@ -449,8 +457,8 @@ YEAR TO DATE:
 - Last year YTD: ${hasLyYtd ? `${fmt$(lyYtdRev)} (${pct(ytdRev, lyYtdRev)} change)` : "not available — first year online"}
 
 CUSTOMER MIX (MTD):
-- New customers (first ever order): ${newMtd}${hasLyMtd ? ` vs LY: ${newLyMtd}` : ""}
-- Returning customers (2+ lifetime orders): ${retMtd}${hasLyMtd ? ` vs LY: ${retLyMtd}` : ""}
+- New customers (first order this year): ${newMtd}${hasLyMtd ? ` vs LY: ${newLyMtd}` : ""}
+- Returning customers (ordered before this month): ${retMtd}${hasLyMtd ? ` vs LY: ${retLyMtd}` : ""}
 
 CUSTOMER LOCATIONS (this week):
 - Australia: ${locations.ausPct}% | Overseas: ${locations.overseaPct}%
@@ -482,7 +490,7 @@ Always open with "Good morning [owner first name]." as the very first words. The
 Cover: revenue and year-on-year comparison, cash position, transactions and AOV, customer mix, where customers are from, top products, and what it all means together.
 When last year data is not available, acknowledge it briefly and move on.
 End with exactly 3 options to explore. Label them clearly as "Option 1:", "Option 2:", "Option 3:" each on a new line, followed by the suggestion as plain prose.
-After the 3 options, close with this exact sign-off on a new line: "That's your Teloskope brief for the week. Have a great Monday, and I'll be back next week with your next update."`;
+After Option 3, close with this exact sign-off on a new line: "That's your Teloskope brief for the week. Have a great Monday, and I'll be back next week with your next update."`;
 
     const userPrompt = `Here is the data for ${store_name} for the ${weekLabel}.
 
@@ -504,9 +512,10 @@ Write the Teloskope weekly audio brief. Remember: all numbers must be written in
     console.log("Brief starts with:", rawBriefText.substring(0, 80));
     console.log("Brief ends with:", rawBriefText.substring(rawBriefText.length - 80));
 
-    // ─── EXTRACT OPTIONS FROM CLAUDE OUTPUT ───────────────────────────────────
+    // ─── EXTRACT OPTIONS FROM CLAUDE OUTPUT (page display only) ──────────────
+    // Sign-off is included in rawBriefText for audio but NOT shown on the page.
 
-    const optionsMatch = rawBriefText.match(/(Option 1:[\s\S]*)/i);
+    const optionsMatch = rawBriefText.match(/(Option 1:[\s\S]*?)(?=That's your Teloskope|$)/i);
     let optionsHtml = "";
     if (optionsMatch) {
       const items = optionsMatch[1].trim()
