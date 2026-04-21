@@ -126,7 +126,7 @@ export default async function handler(req, res) {
 
     // Check if connection already exists for this user
     const searchRes = await fetch(
-      `${BUBBLE_BASE_URL}/obj/meta_connections?constraints=${encodeURIComponent(
+      `${BUBBLE_BASE_URL}/obj/Meta_connection?constraints=${encodeURIComponent(
         JSON.stringify([{ key: "user_id", constraint_type: "equals", value: bubble_user_id }])
       )}`,
       {
@@ -151,7 +151,7 @@ export default async function handler(req, res) {
     if (existingConnection) {
       console.log("Updating existing connection:", existingConnection._id);
       const updateRes = await fetch(
-        `${BUBBLE_BASE_URL}/obj/meta_connections/${existingConnection._id}`,
+        `${BUBBLE_BASE_URL}/obj/Meta_connection/${existingConnection._id}`,
         {
           method: "PATCH",
           headers: {
@@ -165,7 +165,7 @@ export default async function handler(req, res) {
       console.log("Bubble update response:", await updateRes.text());
     } else {
       console.log("Creating new Meta connection...");
-      const createRes = await fetch(`${BUBBLE_BASE_URL}/obj/meta_connections`, {
+      const createRes = await fetch(`${BUBBLE_BASE_URL}/obj/Meta_connection`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
