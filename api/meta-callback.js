@@ -138,7 +138,6 @@ export default async function handler(req, res) {
     const existingConnection = searchData?.response?.results?.[0];
 
     const connectionPayload = {
-      user_id: bubble_user_id,
       meta_access_token: accessToken,
       meta_user_id: metaUserId,
       meta_ad_account_id: adAccountId,
