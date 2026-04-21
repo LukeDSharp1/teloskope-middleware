@@ -16,6 +16,7 @@ export default async function handler(req, res) {
   }
 
   if (!code || !state) {
+    console.error("Missing code or state:", { code: !!code, state: !!state });
     return res.redirect(BUBBLE_REDIRECT_ERROR);
   }
 
@@ -23,6 +24,7 @@ export default async function handler(req, res) {
   try {
     const parsed = JSON.parse(decodeURIComponent(state));
     bubble_user_id = parsed.bubble_user_id;
+    console.log("Parsed bubble_user_id:", bubble_user_id);
   } catch (e) {
     console.error("Failed to parse state:", e);
     return res.redirect(BUBBLE_REDIRECT_ERROR);
@@ -33,7 +35,7 @@ export default async function handler(req, res) {
 
   try {
     // ── Step 1: Exchange code for short-lived access token ──────────────────
-    console.log("Exchanging Meta auth code for token...");
+    console.log("Step 1: Exchanging Meta auth code for short-lived token...");
     const tokenRes = await fetch(
       `https://graph.facebook.com/v19.0/oauth/access_token` +
       `?client_id=${META_APP_ID}` +
@@ -42,18 +44,21 @@ export default async function handler(req, res) {
       `&code=${code}`
     );
 
+    const tokenRaw = await tokenRes.text();
+    console.log("Token exchange response status:", tokenRes.status);
+    console.log("Token exchange response body:", tokenRaw);
+
     if (!tokenRes.ok) {
-      const err = await tokenRes.text();
-      console.error("Token exchange failed:", err);
+      console.error("Token exchange failed");
       return res.redirect(BUBBLE_REDIRECT_ERROR);
     }
 
-    const tokenData = await tokenRes.json();
+    const tokenData = JSON.parse(tokenRaw);
     const shortLivedToken = tokenData.access_token;
     console.log("Short-lived token obtained");
 
     // ── Step 2: Exchange for long-lived token (60 days) ─────────────────────
-    console.log("Exchanging for long-lived token...");
+    console.log("Step 2: Exchanging for long-lived token...");
     const longTokenRes = await fetch(
       `https://graph.facebook.com/v19.0/oauth/access_token` +
       `?grant_type=fb_exchange_token` +
@@ -62,57 +67,64 @@ export default async function handler(req, res) {
       `&fb_exchange_token=${shortLivedToken}`
     );
 
+    const longTokenRaw = await longTokenRes.text();
+    console.log("Long token exchange status:", longTokenRes.status);
+
     if (!longTokenRes.ok) {
-      const err = await longTokenRes.text();
-      console.error("Long-lived token exchange failed:", err);
+      console.error("Long-lived token exchange failed:", longTokenRaw);
       return res.redirect(BUBBLE_REDIRECT_ERROR);
     }
 
-    const longTokenData = await longTokenRes.json();
+    const longTokenData = JSON.parse(longTokenRaw);
     const accessToken = longTokenData.access_token;
-    const expiresIn = longTokenData.expires_in || 5184000; // 60 days default
+    const expiresIn = longTokenData.expires_in || 5184000;
     const expiresAt = new Date(Date.now() + expiresIn * 1000).toISOString();
     console.log("Long-lived token obtained, expires:", expiresAt);
 
-    // ── Step 3: Get user's Meta user ID ─────────────────────────────────────
+    // ── Step 3: Get Meta user ID ─────────────────────────────────────────────
+    console.log("Step 3: Fetching Meta user ID...");
     const meRes = await fetch(
       `https://graph.facebook.com/v19.0/me?access_token=${accessToken}`
     );
     const meData = await meRes.json();
+    console.log("Me response:", JSON.stringify(meData));
     const metaUserId = meData.id;
-    console.log("Meta user ID:", metaUserId);
 
-    // ── Step 4: Discover ad accounts ────────────────────────────────────────
-    console.log("Fetching ad accounts...");
-    const adAccountsRes = await fetch(
-      `https://graph.facebook.com/v19.0/me/adaccounts` +
-      `?fields=id,name,currency,account_status` +
-      `&access_token=${accessToken}`
-    );
+    // ── Step 4: Discover ad accounts (non-fatal) ────────────────────────────
+    console.log("Step 4: Fetching ad accounts...");
+    let adAccountId = "";
+    let adAccountName = "";
+    let allAdAccountsJson = "[]";
 
-    if (!adAccountsRes.ok) {
-      console.error("Failed to fetch ad accounts:", await adAccountsRes.text());
-      return res.redirect(BUBBLE_REDIRECT_ERROR);
+    try {
+      const adAccountsRes = await fetch(
+        `https://graph.facebook.com/v19.0/me/adaccounts` +
+        `?fields=id,name,currency,account_status` +
+        `&access_token=${accessToken}`
+      );
+      const adAccountsData = await adAccountsRes.json();
+      console.log("Ad accounts response:", JSON.stringify(adAccountsData));
+
+      const adAccounts = adAccountsData.data || [];
+      console.log("Ad accounts found:", adAccounts.length);
+
+      const activeAccount = adAccounts.find(a => a.account_status === 1) || adAccounts[0] || null;
+      if (activeAccount) {
+        adAccountId = activeAccount.id;
+        adAccountName = activeAccount.name;
+        console.log("Using ad account:", adAccountId, adAccountName);
+      } else {
+        console.warn("No ad accounts found — continuing without ad account");
+      }
+      allAdAccountsJson = JSON.stringify(adAccounts);
+    } catch (e) {
+      console.warn("Ad account fetch failed (non-fatal):", e.message);
     }
-
-    const adAccountsData = await adAccountsRes.json();
-    const adAccounts = adAccountsData.data || [];
-    console.log("Ad accounts found:", adAccounts.length);
-
-    // Use the first active ad account
-    const activeAccount = adAccounts.find(a => a.account_status === 1) || adAccounts[0];
-    if (!activeAccount) {
-      console.error("No ad accounts found for this user");
-      return res.redirect(BUBBLE_REDIRECT_ERROR);
-    }
-
-    const adAccountId = activeAccount.id; // format: act_XXXXXXXXX
-    console.log("Using ad account:", adAccountId, activeAccount.name);
 
     // ── Step 5: Save to Bubble ───────────────────────────────────────────────
-    // First check if a meta_connection already exists for this user
-    console.log("Saving Meta connection to Bubble...");
+    console.log("Step 5: Saving Meta connection to Bubble...");
 
+    // Check if connection already exists for this user
     const searchRes = await fetch(
       `${BUBBLE_BASE_URL}/obj/meta_connection?constraints=${encodeURIComponent(
         JSON.stringify([{ key: "user_id", constraint_type: "equals", value: bubble_user_id }])
@@ -121,8 +133,8 @@ export default async function handler(req, res) {
         headers: { Authorization: `Bearer ${process.env.BUBBLE_API_KEY}` },
       }
     );
-
     const searchData = await searchRes.json();
+    console.log("Bubble search response:", JSON.stringify(searchData));
     const existingConnection = searchData?.response?.results?.[0];
 
     const connectionPayload = {
@@ -130,14 +142,14 @@ export default async function handler(req, res) {
       meta_access_token: accessToken,
       meta_user_id: metaUserId,
       meta_ad_account_id: adAccountId,
-      meta_ad_account_name: activeAccount.name,
+      meta_ad_account_name: adAccountName,
       meta_connected: "yes",
       token_expires_at: expiresAt,
-      all_ad_accounts_json: JSON.stringify(adAccounts),
+      all_ad_accounts_json: allAdAccountsJson,
     };
 
     if (existingConnection) {
-      // Update existing connection
+      console.log("Updating existing connection:", existingConnection._id);
       const updateRes = await fetch(
         `${BUBBLE_BASE_URL}/obj/meta_connection/${existingConnection._id}`,
         {
@@ -149,9 +161,10 @@ export default async function handler(req, res) {
           body: JSON.stringify(connectionPayload),
         }
       );
-      console.log("Updated existing Meta connection:", updateRes.status);
+      console.log("Bubble update status:", updateRes.status);
+      console.log("Bubble update response:", await updateRes.text());
     } else {
-      // Create new connection
+      console.log("Creating new Meta connection...");
       const createRes = await fetch(`${BUBBLE_BASE_URL}/obj/meta_connection`, {
         method: "POST",
         headers: {
@@ -160,13 +173,25 @@ export default async function handler(req, res) {
         },
         body: JSON.stringify(connectionPayload),
       });
-      const createData = await createRes.json();
-      const newConnectionId = createData?.id;
-      console.log("Created new Meta connection:", newConnectionId);
+      const createStatus = createRes.status;
+      const createRaw = await createRes.text();
+      console.log("Bubble create status:", createStatus);
+      console.log("Bubble create raw response:", createRaw);
 
-      // Link connection to user record
+      let newConnectionId;
+      try {
+        const createData = JSON.parse(createRaw);
+        newConnectionId = createData?.id;
+      } catch (e) {
+        console.error("Failed to parse Bubble create response:", e.message);
+      }
+
+      console.log("New connection ID:", newConnectionId);
+
+      // ── Step 6: Link connection to user record ─────────────────────────────
       if (newConnectionId) {
-        await fetch(`${BUBBLE_BASE_URL}/obj/user/${bubble_user_id}`, {
+        console.log("Step 6: Linking connection to user record...");
+        const linkRes = await fetch(`${BUBBLE_BASE_URL}/obj/user/${bubble_user_id}`, {
           method: "PATCH",
           headers: {
             "Content-Type": "application/json",
@@ -174,14 +199,19 @@ export default async function handler(req, res) {
           },
           body: JSON.stringify({ meta_connection: newConnectionId }),
         });
-        console.log("Linked Meta connection to user record");
+        console.log("User link status:", linkRes.status);
+        console.log("User link response:", await linkRes.text());
+      } else {
+        console.error("No connection ID returned — skipping user link");
       }
     }
 
+    console.log("Meta OAuth flow complete — redirecting to success");
     return res.redirect(BUBBLE_REDIRECT_SUCCESS);
 
   } catch (err) {
-    console.error("Meta callback error:", err.message);
+    console.error("Meta callback unhandled error:", err.message);
+    console.error(err.stack);
     return res.redirect(BUBBLE_REDIRECT_ERROR);
   }
 }
