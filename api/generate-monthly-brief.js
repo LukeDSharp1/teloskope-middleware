@@ -16,6 +16,7 @@ const pad = (n) => String(n).padStart(2, "0");
 const fmt$ = (n) => n !== null && n !== undefined ? `$${Math.round(n).toLocaleString()}` : "not available";
 const fmtPct = (n) => n !== null && n !== undefined ? `${n.toFixed(1)}%` : "N/A";
 const pctOf = (val, base) => base > 0 ? (val / base) * 100 : null;
+const round2 = (n) => n !== null && n !== undefined ? Math.round(n * 100) / 100 : null;
 
 // ─── BUBBLE CDN URL HELPER ────────────────────────────────────────────────────
 
@@ -116,9 +117,7 @@ function parseXeroPL(report) {
         const label = (row.Cells[0]?.Value || "").trim();
         const raw = (row.Cells[1]?.Value || "").replace(/,/g, "");
         const val = parseFloat(raw);
-        if (label && !isNaN(val)) {
-          accounts[label] = val;
-        }
+        if (label && !isNaN(val)) accounts[label] = val;
       }
       if (row.Rows) walkRows(row.Rows);
     }
@@ -131,9 +130,7 @@ function sumAccounts(accounts, ...terms) {
   let total = 0;
   for (const [label, val] of Object.entries(accounts)) {
     const l = label.toLowerCase();
-    if (terms.some(t => l.includes(t.toLowerCase()))) {
-      total += val;
-    }
+    if (terms.some(t => l.includes(t.toLowerCase()))) total += val;
   }
   return total;
 }
@@ -142,41 +139,33 @@ function sumAccounts(accounts, ...terms) {
 
 function parseXeroBalanceSheet(report) {
   const allRows = {};
-
   const walkRows = (rows) => {
     for (const row of rows || []) {
       if ((row.RowType === "Row" || row.RowType === "SummaryRow") && row.Cells?.length >= 2) {
         const label = (row.Cells[0]?.Value || "").trim();
         const raw = (row.Cells[1]?.Value || "").replace(/,/g, "");
         const val = parseFloat(raw);
-        if (label && !isNaN(val)) {
-          allRows[label] = val;
-        }
+        if (label && !isNaN(val)) allRows[label] = val;
       }
       if (row.Rows) walkRows(row.Rows);
     }
   };
-
   walkRows(report?.Rows);
   console.log("Balance sheet rows:", JSON.stringify(allRows, null, 2));
 
   let cashBalance = null;
   let accountsReceivable = null;
-  let accountsPayable = null;
 
   for (const [label, val] of Object.entries(allRows)) {
     const l = label.toLowerCase();
     if (l.includes("total bank") && cashBalance === null) cashBalance = val;
     else if (l.includes("cash") && !l.includes("total") && cashBalance === null) cashBalance = val;
-    if ((l.includes("receivable") || l.includes("trade debtor")) && accountsReceivable === null) {
+    if ((l.includes("accounts receivable") || l.includes("trade debtor")) && accountsReceivable === null) {
       accountsReceivable = Math.abs(val);
-    }
-    if ((l.includes("payable") || l.includes("trade creditor")) && accountsPayable === null) {
-      accountsPayable = Math.abs(val);
     }
   }
 
-  return { cashBalance, accountsReceivable, accountsPayable };
+  return { cashBalance, accountsReceivable };
 }
 
 // ─── SHOPIFY INVENTORY (cost price via InventoryItems API) ────────────────────
@@ -187,7 +176,7 @@ async function fetchShopifyInventoryValue(shopDomain, accessToken) {
     let totalUnits = 0;
     const costMap = {};
 
-    // Step 1: Build cost price map from inventory items
+    // Step 1: Build cost price map
     let itemsUrl = `https://${shopDomain}/admin/api/2024-01/inventory_items.json?limit=250`;
     while (itemsUrl) {
       const res = await fetch(itemsUrl, {
@@ -260,10 +249,9 @@ function buildBriefHtml(d, monthLabel) {
     section("Cash Position:", [
       `Bank balance: ${fmt$(d.cashBalance)}`,
       `Accounts receivable: ${fmt$(d.accountsReceivable)}`,
-      `Accounts payable: ${d.accountsPayable !== null ? fmt$(d.accountsPayable) : "not available"}`,
     ]),
     section("Inventory (Shopify, at cost):", [
-      d.inventoryValue ? `Stock value at cost: ${fmt$(d.inventoryValue)}` : "Stock value: not available",
+      d.inventoryValueClose ? `Stock value at cost: ${fmt$(d.inventoryValueClose)}` : "Stock value: not available",
       `Total units on hand: ${d.inventoryUnits || "not available"}`,
     ]),
     `<p style="margin-top:16px;font-size:12px;color:#888;font-family:Inter,sans-serif;">Note: Gross profit and net profit excluded pending Xero stock reconciliation.</p>`,
@@ -362,6 +350,7 @@ export default async function handler(req, res) {
 
     console.log("--- P&L ---");
     console.log("Net Revenue:", netRevenue.toFixed(2));
+    console.log("Discounts:", discounts.toFixed(2));
     console.log("Advertising:", advertising.toFixed(2), fmtPct(advPct));
     console.log("Freight:", freight.toFixed(2), fmtPct(freightPct));
     console.log("Wages:", wages.toFixed(2));
@@ -370,14 +359,21 @@ export default async function handler(req, res) {
 
     // ─── PARSE BALANCE SHEET ──────────────────────────────────────────────────
 
-    const { cashBalance, accountsReceivable, accountsPayable } = parseXeroBalanceSheet(bsData?.Reports?.[0]);
+    const { cashBalance, accountsReceivable } = parseXeroBalanceSheet(bsData?.Reports?.[0]);
 
     console.log("--- Balance Sheet ---");
     console.log("Cash:", cashBalance);
     console.log("AR:", accountsReceivable);
-    console.log("AP:", accountsPayable);
     console.log("--- Inventory ---");
     console.log(inventoryData);
+
+    // Inventory fields — open is null for now (no prior month snapshot), close is current
+    const inventoryValueClose = inventoryData?.totalValue || null;
+    const inventoryValueOpen = null; // future: pull from prior month brief record
+    const inventoryChange = inventoryValueClose !== null && inventoryValueOpen !== null
+      ? inventoryValueClose - inventoryValueOpen
+      : null;
+    const inventoryUnits = inventoryData?.totalUnits || null;
 
     // ─── CLAUDE ───────────────────────────────────────────────────────────────
 
@@ -401,12 +397,11 @@ NOTE: Gross profit and net profit are excluded this month as stock reconciliatio
 CASH POSITION (end of month):
 - Bank balance: ${fmt$(cashBalance)}
 - Accounts receivable: ${fmt$(accountsReceivable)}
-- Accounts payable: ${accountsPayable !== null ? fmt$(accountsPayable) : "not available"}
 
 INVENTORY (Shopify, at cost):
-${inventoryData
-    ? `- Stock value at cost: ${fmt$(inventoryData.totalValue)}\n- Total units on hand: ${inventoryData.totalUnits}`
-    : "- Not available"}
+${inventoryValueClose
+      ? `- Stock value at cost: ${fmt$(inventoryValueClose)}\n- Total units on hand: ${inventoryUnits}`
+      : "- Not available this month"}
 `;
 
     console.log("Calling Claude...");
@@ -434,19 +429,21 @@ Cover: revenue, key expense ratios (advertising, freight, discounts as % of reve
 Note clearly that gross profit and net profit are excluded pending stock reconciliation.
 End with exactly 2 options to explore at a strategic level for the month ahead. Label them "Option 1:" and "Option 2:" each on a new line.
 Close with: "That's your Teloskope monthly brief for ${monthLabel}. I'll be back mid-month with your next update."`,
-      messages: [{ role: "user", content: `Here is the data for ${store_name} for ${monthLabel}.\n\n${dataBlock}\n\nWrite the Teloskope monthly audio brief. All numbers in full spoken words. No symbols.` }],
+      messages: [{
+        role: "user",
+        content: `Here is the data for ${store_name} for ${monthLabel}.\n\n${dataBlock}\n\nWrite the Teloskope monthly audio brief. All numbers in full spoken words. No symbols.`
+      }],
     });
 
     const rawBriefText = claudeResponse.content[0].text;
     console.log("Claude brief generated, chars:", rawBriefText.length);
 
-    // ─── BUILD HTML DISPLAY BRIEF ─────────────────────────────────────────────
+    // ─── HTML DISPLAY BRIEF ───────────────────────────────────────────────────
 
     const briefHtml = buildBriefHtml({
       netRevenue, discounts, advertising, advPct, freight, freightPct,
-      wages, rent, totalOpex, cashBalance, accountsReceivable, accountsPayable,
-      inventoryValue: inventoryData?.totalValue || null,
-      inventoryUnits: inventoryData?.totalUnits || null,
+      wages, rent, totalOpex, cashBalance, accountsReceivable,
+      inventoryValueClose, inventoryUnits,
     }, monthLabel);
 
     // ─── ELEVENLABS ───────────────────────────────────────────────────────────
@@ -510,23 +507,24 @@ Close with: "That's your Teloskope monthly brief for ${monthLabel}. I'll be back
       month_end_date: toDate.toISOString(),
       brief_text: briefHtml,
       audio_url: audioUrl,
-      xero_revenue: Math.round(netRevenue * 100) / 100,
-      xero_discounts: Math.round(discounts * 100) / 100,
-      xero_advertising: Math.round(advertising * 100) / 100,
+      xero_revenue: round2(netRevenue),
+      xero_discounts: round2(discounts),
+      xero_advertising: round2(advertising),
       xero_advertising_pct: advPct ? Math.round(advPct * 10) / 10 : null,
-      xero_freight: Math.round(freight * 100) / 100,
+      xero_freight: round2(freight),
       xero_freight_pct: freightPct ? Math.round(freightPct * 10) / 10 : null,
-      xero_wages: Math.round(wages * 100) / 100,
-      xero_rent: Math.round(rent * 100) / 100,
-      xero_total_opex: totalOpex ? Math.round(totalOpex * 100) / 100 : null,
-      xero_cash_balance: cashBalance ? Math.round(cashBalance * 100) / 100 : null,
-      xero_accounts_receivable: accountsReceivable ? Math.round(accountsReceivable * 100) / 100 : null,
-      xero_accounts_payable: accountsPayable ? Math.round(accountsPayable * 100) / 100 : null,
-      shopify_inventory_value: inventoryData ? Math.round(inventoryData.totalValue * 100) / 100 : null,
-      shopify_inventory_units: inventoryData?.totalUnits || null,
+      xero_wages: round2(wages),
+      xero_rent: round2(rent),
+      xero_total_opex: round2(totalOpex),
+      xero_cash_balance: round2(cashBalance),
+      xero_accounts_receivable: round2(accountsReceivable),
+      shopify_inventory_value_close: round2(inventoryValueClose),
+      shopify_inventory_value_open: round2(inventoryValueOpen),
+      shopify_inventory_change: round2(inventoryChange),
+      shopify_inventory_units: inventoryUnits,
     };
 
-    const createRes = await fetch(`${BUBBLE_BASE_URL}/obj/monthlybrief`, {
+    const createRes = await fetch(`${BUBBLE_BASE_URL}/obj/MonthlyBrief`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -560,6 +558,7 @@ Close with: "That's your Teloskope monthly brief for ${monthLabel}. I'll be back
         body: JSON.stringify({ latest_monthly_brief: briefId }),
       });
       console.log("User link status:", linkRes.status);
+      console.log("User link response:", await linkRes.text());
     }
 
     // ─── TWILIO SMS ───────────────────────────────────────────────────────────
@@ -597,14 +596,14 @@ Close with: "That's your Teloskope monthly brief for ${monthLabel}. I'll be back
       brief_url: briefId ? `https://teloskope.ai/version-test/monthlybrief/${briefId}` : null,
       audio_url: audioUrl,
       data: {
-        net_revenue: Math.round(netRevenue * 100) / 100,
+        net_revenue: round2(netRevenue),
+        discounts: round2(discounts),
         advertising_pct: advPct ? Math.round(advPct * 10) / 10 : null,
         freight_pct: freightPct ? Math.round(freightPct * 10) / 10 : null,
-        cash_balance: cashBalance,
-        accounts_receivable: accountsReceivable,
-        accounts_payable: accountsPayable,
-        inventory_value: inventoryData?.totalValue || null,
-        inventory_units: inventoryData?.totalUnits || null,
+        cash_balance: round2(cashBalance),
+        accounts_receivable: round2(accountsReceivable),
+        inventory_value: round2(inventoryValueClose),
+        inventory_units: inventoryUnits,
       },
     });
 
