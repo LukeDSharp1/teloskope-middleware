@@ -143,8 +143,10 @@ async function refreshXeroToken(xeroRefreshToken, xeroConnectionId) {
 }
 
 async function fetchXeroCashBalance(xeroAccessToken, xeroTenantId, xeroRefreshToken, xeroConnectionId) {
+  const today = new Date().toISOString().split("T")[0]; // YYYY-MM-DD
+  console.log("Fetching Xero BalanceSheet as at:", today);
   const doFetch = async (token) => {
-    return fetch("https://api.xero.com/api.xro/2.0/Reports/BalanceSheet", {
+    return fetch(`https://api.xero.com/api.xro/2.0/Reports/BalanceSheet?date=${today}`, {
       headers: {
         Authorization: `Bearer ${token}`,
         "Xero-tenant-id": xeroTenantId,
