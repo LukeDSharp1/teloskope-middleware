@@ -780,13 +780,20 @@ Write the Teloskope weekly audio brief. Remember: all numbers must be written in
       body: JSON.stringify(bubblePayload),
     });
 
-    if (!bubbleRes.ok) throw new Error(`Bubble error ${bubbleRes.status}: ${await bubbleRes.text()}`);
+if (!bubbleRes.ok) throw new Error(`Bubble error ${bubbleRes.status}: ${await bubbleRes.text()}`);
     const bubbleData = await bubbleRes.json();
     console.log("Bubble response:", JSON.stringify(bubbleData));
 
+    // Build the unique brief URL using the brief_id Bubble returned
+    const briefUniqueId = bubbleData?.response?.brief_id;
+    const fullBriefUrl = briefUniqueId
+      ? `${brief_page_base_url}${briefUniqueId}`
+      : brief_page_base_url;
+    console.log("Full brief URL:", fullBriefUrl);
+
     // ─── TWILIO SMS ───────────────────────────────────────────────────────────
     console.log("Sending SMS...");
-    const smsBody = `Good morning ${firstName}! Your Teloskope Weekly Brief for the ${weekLabel} is ready. Listen here: ${brief_page_base_url}`;
+    const smsBody = `Good morning ${firstName}! Your Teloskope Weekly Brief for the ${weekLabel} is ready. Listen here: ${fullBriefUrl}`;
 
     const twilioRes = await fetch(
       `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`,
@@ -803,13 +810,11 @@ Write the Teloskope weekly audio brief. Remember: all numbers must be written in
     if (!twilioRes.ok) throw new Error(`Twilio error ${twilioRes.status}: ${await twilioRes.text()}`);
     console.log("SMS sent to", user_phone);
 
-    return res.status(200).json({
+return res.status(200).json({
       success: true,
       brief_id: bubbleData?.response?.brief_id,
-      brief_url: brief_page_base_url,
-      audio_url: audioUrl,
-      week_end: `${weekEnd.year}-${pad(weekEnd.month + 1)}-${pad(weekEnd.day)}`,
-      sms_sent_to: user_phone,
+      brief_url: fullBriefUrl,
+      ...
     });
 
   } catch (err) {
