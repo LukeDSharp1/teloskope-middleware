@@ -814,7 +814,9 @@ return res.status(200).json({
       success: true,
       brief_id: bubbleData?.response?.brief_id,
       brief_url: fullBriefUrl,
-      ...
+      audio_url: audioUrl,
+      week_end: `${weekEnd.year}-${pad(weekEnd.month + 1)}-${pad(weekEnd.day)}`,
+      sms_sent_to: user_phone,
     });
 
   } catch (err) {
