@@ -1,13 +1,16 @@
 // api/generate-weekly-brief.js
-// V1.3: Removed bank-feed channel attribution and ad spend detection (data not reliable enough).
-//       Meta/Google ad spend will come from direct platform APIs when wired up.
-// Pulls Shopify + Xero (cash + P&L total revenue) → Claude → ElevenLabs → Bubble → Twilio SMS.
+// V1.5: Added Meta Ads insights (weekly spend, impressions, clicks + MTD spend).
+// V1.4: Removed PCW (prior corresponding week LY) from audio and data block.
+//       Removed Options section from audio and HTML display.
+//       Added ABS macro context (April 2026 household spending) to audio and HTML.
+//       Cash balance now states number only with "at last reconciled date" — no evaluation.
+// Pulls Shopify + Xero (cash + P&L total revenue) + Meta Ads → Claude → ElevenLabs → Bubble → Twilio SMS.
 // ALL figures ex-GST.
 
 import Anthropic from "@anthropic-ai/sdk";
 
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
-const ELEVENLABS_VOICE_ID = "Zpq4UaaRVMryEw8KSTWI"; // New voice
+const ELEVENLABS_VOICE_ID = "Zpq4UaaRVMryEw8KSTWI";
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
 const TWILIO_PHONE_NUMBER = process.env.TWILIO_PHONE_NUMBER;
@@ -56,6 +59,21 @@ function cleanBubbleUrl(raw) {
   const stripped = raw.trim().replace(/^"|"$/g, "");
   return stripped.startsWith("//") ? `https:${stripped}` : stripped;
 }
+
+// ─── ABS MACRO CONTEXT (updated monthly) ─────────────────────────────────────
+// Source: ABS Monthly Household Spending Indicator, April 2026 (released 28 May 2026)
+const ABS_MACRO_CONTEXT = `
+ABS MACRO CONTEXT (April 2026, latest available):
+- Total household spending fell 1.1% in April 2026 (seasonally adjusted), following a 1.6% rise in March.
+- Annual spending still up 4.9% vs April 2025, but slowing from 6.2% annual rise in March.
+- Categories relevant to retail/homewares/ceramics:
+  - Clothing and footwear: -2.2% in April (consumers pulling back on discretionary apparel)
+  - Furnishings and household equipment: -0.1% in April (essentially flat)
+  - Hotels, cafes and restaurants: +0.5% (slight positive for hospitality)
+- Main driver of the fall was transport (-4.7%), particularly air travel, due to Middle East conflict impacts on fuel and airfares.
+- Food spending fell 1.3%, with continued shift to generic/cheaper products in supermarkets.
+- Context: The broader pullback in discretionary spending in April reflects household budget pressure from elevated fuel costs, despite the Federal Government halving fuel excise from 1 April.
+`;
 
 // ─── XERO HELPERS ─────────────────────────────────────────────────────────────
 
@@ -183,7 +201,6 @@ async function fetchXeroCashBalance(xeroAccessToken, xeroTenantId, xeroRefreshTo
   }
 }
 
-// Fetch Xero P&L Total Trading Income (ex-GST) for a period
 async function fetchXeroTotalRevenue(start, end, xeroAccessToken, xeroTenantId, xeroRefreshToken, xeroConnectionId) {
   const fromIso = start.toISOString().split("T")[0];
   const toIso   = end.toISOString().split("T")[0];
@@ -220,7 +237,6 @@ async function fetchXeroTotalRevenue(start, end, xeroAccessToken, xeroTenantId, 
     const report = data?.Reports?.[0];
     if (!report) return null;
 
-    // Xero P&L returns Total Trading Income (ex-GST) as a SummaryRow
     let totalIncome = null;
     const searchRows = (rows) => {
       for (const row of rows || []) {
@@ -247,6 +263,34 @@ async function fetchXeroTotalRevenue(start, end, xeroAccessToken, xeroTenantId, 
   }
 }
 
+// ─── META HELPERS ─────────────────────────────────────────────────────────────
+
+async function fetchMetaInsights(metaAccessToken, metaAdAccountId, datePreset) {
+  if (!metaAccessToken || !metaAdAccountId) return null;
+  try {
+    const url = `https://graph.facebook.com/v25.0/${metaAdAccountId}/insights?fields=spend,impressions,clicks&date_preset=${datePreset}&level=account&access_token=${metaAccessToken}`;
+    const res = await fetch(url);
+    if (!res.ok) {
+      console.error(`Meta API error (${datePreset}):`, res.status, await res.text());
+      return null;
+    }
+    const data = await res.json();
+    const row = data?.data?.[0];
+    if (!row) {
+      console.log(`Meta insights (${datePreset}): no data returned (no spend in period)`);
+      return { spend: 0, impressions: 0, clicks: 0 };
+    }
+    return {
+      spend: parseFloat(row.spend || 0),
+      impressions: parseInt(row.impressions || 0),
+      clicks: parseInt(row.clicks || 0),
+    };
+  } catch (err) {
+    console.error(`Meta fetch error (${datePreset}):`, err.message);
+    return null;
+  }
+}
+
 // ─── MAIN HANDLER ─────────────────────────────────────────────────────────────
 
 export default async function handler(req, res) {
@@ -267,6 +311,8 @@ export default async function handler(req, res) {
     user_phone,
     store_name,
     brief_page_base_url,
+    meta_access_token,
+    meta_ad_account_id,
   } = req.body;
 
   if (!shopify_shop_domain || !shopify_access_token || !bubble_secret_key || !user_id || !user_phone) {
@@ -295,8 +341,6 @@ export default async function handler(req, res) {
     const daysBackToSunday = today.dayOfWeek === 0 ? 7 : today.dayOfWeek;
     const weekEnd   = shiftDays(today, -daysBackToSunday);
     const weekStart = shiftDays(weekEnd, -6);
-    const pcwEnd    = shiftYear(weekEnd, -1);
-    const pcwStart  = shiftYear(weekStart, -1);
 
     const mtdStart   = { year: today.year, month: today.month, day: 1 };
     const mtdEnd     = today;
@@ -310,8 +354,6 @@ export default async function handler(req, res) {
 
     const wS  = shopMidnightUtc(weekStart.year, weekStart.month, weekStart.day);
     const wE  = shopEndOfDayUtc(weekEnd.year, weekEnd.month, weekEnd.day);
-    const pS  = shopMidnightUtc(pcwStart.year, pcwStart.month, pcwStart.day);
-    const pE  = shopEndOfDayUtc(pcwEnd.year, pcwEnd.month, pcwEnd.day);
     const mS  = shopMidnightUtc(mtdStart.year, mtdStart.month, mtdStart.day);
     const mE  = shopEndOfDayUtc(mtdEnd.year, mtdEnd.month, mtdEnd.day);
     const lmS = shopMidnightUtc(lyMtdStart.year, lyMtdStart.month, lyMtdStart.day);
@@ -341,7 +383,6 @@ export default async function handler(req, res) {
       return orders;
     };
 
-    // Shopify total_price is GROSS (inc. GST). All calculations below ex-GST.
     const sumRevenueGross = (orders) => orders.reduce((s, o) => s + parseFloat(o.total_price || 0), 0);
     const sumRevenueExGst = (orders) => stripGst(sumRevenueGross(orders));
     const calcAovExGst    = (orders) => orders.length > 0 ? sumRevenueExGst(orders) / orders.length : 0;
@@ -382,7 +423,7 @@ export default async function handler(req, res) {
     const xeroAvailable = !!(xero_access_token && xero_tenant_id);
 
     const [
-      weekOrders, pcwOrders,
+      weekOrders,
       mtdOrders, lyMtdOrders,
       ytdOrders, lyYtdOrders,
       preMtdOrders, preLyMtdOrders,
@@ -390,9 +431,10 @@ export default async function handler(req, res) {
       xeroCashBalance,
       xeroWeekTotalRevenue,
       xeroMtdTotalRevenue,
+      metaWeek,
+      metaMtd,
     ] = await Promise.all([
       fetchAllOrders(wS, wE),
-      fetchAllOrders(pS, pE),
       fetchAllOrders(mS, mE, "total_price,created_at,customer"),
       fetchAllOrders(lmS, lmE, "total_price,created_at,customer"),
       fetchAllOrders(yS, yE),
@@ -403,6 +445,8 @@ export default async function handler(req, res) {
       xeroAvailable ? fetchXeroCashBalance(xero_access_token, xero_tenant_id, xero_refresh_token, xero_connection_id) : Promise.resolve(null),
       xeroAvailable ? fetchXeroTotalRevenue(wS, wE, xero_access_token, xero_tenant_id, xero_refresh_token, xero_connection_id) : Promise.resolve(null),
       xeroAvailable ? fetchXeroTotalRevenue(mS, mE, xero_access_token, xero_tenant_id, xero_refresh_token, xero_connection_id) : Promise.resolve(null),
+      fetchMetaInsights(meta_access_token, meta_ad_account_id, "last_7d"),
+      fetchMetaInsights(meta_access_token, meta_ad_account_id, "this_month"),
     ]);
 
     console.log("Week orders:", weekOrders.length, "| Revenue ex-GST:", sumRevenueExGst(weekOrders).toFixed(2));
@@ -410,6 +454,8 @@ export default async function handler(req, res) {
     console.log("Xero reconciled bank position:", xeroCashBalance);
     console.log("Xero P&L week total (ex-GST):", xeroWeekTotalRevenue);
     console.log("Xero P&L MTD total (ex-GST):", xeroMtdTotalRevenue);
+    console.log("Meta week insights:", metaWeek);
+    console.log("Meta MTD insights:", metaMtd);
 
     // ─── NEW VS RETURNING CUSTOMER LOGIC ─────────────────────────────────────
     const preMtdCustomerIds = new Set(preMtdOrders.filter(o => o.customer?.id).map(o => String(o.customer.id)));
@@ -426,17 +472,14 @@ export default async function handler(req, res) {
 
     // ─── CALCULATIONS (ALL EX-GST) ────────────────────────────────────────────
     const weekRev  = sumRevenueExGst(weekOrders);
-    const pcwRev   = sumRevenueExGst(pcwOrders);
     const mtdRev   = sumRevenueExGst(mtdOrders);
     const lyMtdRev = sumRevenueExGst(lyMtdOrders);
     const ytdRev   = sumRevenueExGst(ytdOrders);
     const lyYtdRev = sumRevenueExGst(lyYtdOrders);
     const weekTx   = weekOrders.length;
-    const pcwTx    = pcwOrders.length;
     const mtdTx    = mtdOrders.length;
     const lyMtdTx  = lyMtdOrders.length;
     const weekAov  = calcAovExGst(weekOrders);
-    const pcwAov   = calcAovExGst(pcwOrders);
 
     const { newC: newMtd, ret: retMtd }     = countNewRet(mtdOrders, preMtdCustomerIds);
     const { newC: newLyMtd, ret: retLyMtd } = countNewRet(lyMtdOrders, preLyMtdCustomerIds);
@@ -468,17 +511,18 @@ export default async function handler(req, res) {
     console.log("Week split — Online:", weekRev.toFixed(2), "Other:", weekOtherSales, "Total:", xeroWeekTotalRevenue);
     console.log("MTD split — Online:", mtdRev.toFixed(2), "Other:", mtdOtherSales, "Total:", xeroMtdTotalRevenue);
 
-    const pct  = (a, b) => b > 0 ? `${(((a - b) / b) * 100).toFixed(1)}%` : "N/A";
-    const fmt$ = (n) => `$${Math.round(n).toLocaleString()}`;
+    const pct    = (a, b) => b > 0 ? `${(((a - b) / b) * 100).toFixed(1)}%` : "N/A";
+    const fmt$   = (n) => `$${Math.round(n).toLocaleString()}`;
     const fmtPct = (n) => (n * 100).toFixed(1) + "%";
 
-    const hasLyWeek = pcwRev > 0 || pcwTx > 0;
     const hasLyMtd  = lyMtdRev > 0 || lyMtdTx > 0;
     const hasLyYtd  = lyYtdRev > 0;
 
     const weekLabel  = `week ending ${fmtDate(weekEnd)}`;
     const monthLabel = fmtDate({ year: today.year, month: today.month, day: 1 }, { month: "long", year: "numeric" });
-    const cashNote   = xeroCashBalance !== null && xeroCashBalance !== undefined ? fmt$(xeroCashBalance) : "not available";
+    const cashNote   = xeroCashBalance !== null && xeroCashBalance !== undefined
+      ? `${fmt$(xeroCashBalance)} at last reconciled date`
+      : "not available";
 
     const firstName = (user_name || "").split(" ")[0] || user_name;
 
@@ -516,8 +560,7 @@ ALL FIGURES EX-GST UNLESS NOTED OTHERWISE.
 ${totalSalesBlock}
 
 ONLINE PERFORMANCE (Shopify, ex-GST):
-- Revenue: ${fmt$(weekRev)} | ${weekTx} orders | AOV ${fmt$(weekAov)}
-- Same week last year: ${hasLyWeek ? `${fmt$(pcwRev)}, ${pcwTx} orders, AOV ${fmt$(pcwAov)} (${pct(weekRev, pcwRev)} change)` : "not available — no online orders this week last year"}
+- Revenue this week: ${fmt$(weekRev)} | ${weekTx} orders | AOV ${fmt$(weekAov)}
 
 RECONCILED BANK POSITION (Xero):
 - Bank balance: ${cashNote}
@@ -542,6 +585,18 @@ TOP 5 PRODUCTS THIS WEEK (Shopify):
 ${topProducts.length > 0
   ? topProducts.map((p, i) => `${i + 1}. ${p.title} — ${p.quantity} units`).join("\n")
   : "No orders this week"}
+
+META ADS (last 7 days):
+${metaWeek
+  ? `- Spend: $${metaWeek.spend.toFixed(2)} | Impressions: ${metaWeek.impressions.toLocaleString()} | Clicks: ${metaWeek.clicks.toLocaleString()}`
+  : "- Not connected or no data"}
+
+META ADS (month to date):
+${metaMtd
+  ? `- Spend: $${metaMtd.spend.toFixed(2)} | Impressions: ${metaMtd.impressions.toLocaleString()} | Clicks: ${metaMtd.clicks.toLocaleString()}`
+  : "- Not connected or no data"}
+
+${ABS_MACRO_CONTEXT}
 `;
 
     const systemPrompt = `You are Teloskope, a smart weekly business advisor for independent retail store owners.
@@ -559,27 +614,29 @@ This script will be read aloud by a text-to-speech voice. You must write ALL num
 - AOV: write as words e.g. "five hundred and thirteen dollars" not "$513"
 - All other numbers: write in full words
 
-ALL FIGURES ARE EX-GST. You can mention "ex-GST" once near the start when introducing the headline revenue, but don't repeat it every sentence — once is enough.
+ALL FIGURES ARE EX-GST. You can mention "ex-GST" once near the start when introducing the headline revenue, but don't repeat it every sentence.
 
 The brief should take about 90 to 120 seconds to read aloud.
 
 Always open with "Good morning [owner first name]." as the very first words. Then immediately lead with the headline TOTAL sales figure for the week (online plus other combined) in full words, noting it's ex-GST.
 
-Cover, in this order: total sales for the week split into online and other (in-store plus wholesale combined), online performance and year-on-year comparison, MTD total sales split into online and other, reconciled bank position, transactions and AOV, customer mix, where customers are from, top products, and what it all means together.
+Cover, in this order: total sales for the week split into online and other (in-store plus wholesale combined), online performance this week, MTD total sales split into online and other with last year MTD comparison, reconciled bank balance (state the number and note it is at last reconciled date — do not evaluate or comment on whether it is healthy or concerning), transactions and AOV, customer mix MTD vs last year MTD, where customers are from, top products this week, Meta ads spend this week and MTD (if available — if no spend, mention briefly and move on).
 
-The "Other" sales figure (in-store + wholesale) comes from Xero reconciled data minus Shopify, so it may lag by a few days depending on the bookkeeper's reconciliation pace. Treat this as the most accurate available picture without over-claiming precision.
+CASH BALANCE INSTRUCTION: Simply state the bank balance figure and that it is at last reconciled date. Do not add any evaluative commentary — no "that's healthy", no "needs attention", no qualitative judgement of any kind.
+
+The "Other" sales figure (in-store + wholesale) comes from Xero reconciled data minus Shopify. Treat as the most accurate available picture without over-claiming precision.
 
 When last year data is not available, acknowledge it briefly and move on.
 
-End with exactly 3 options to explore. Label them clearly as "Option 1:", "Option 2:", "Option 3:" each on a new line, followed by the suggestion as plain prose.
+MACRO CONTEXT: Include 1-2 sentences near the end referencing the ABS household spending data for the most recently reported month. Keep it relevant to the store's category. Frame it as useful market context — not alarm, not dismissal. Acknowledge it but don't dwell.
 
-After Option 3, close with this exact sign-off on a new line: "That's your Teloskope brief for the week. Have a great Monday, and I'll be back next week with your next update."`;
+Do NOT include any "Options to explore" section. End directly with this sign-off on a new line: "That's your Teloskope brief for the week. Have a great Monday, and I'll be back next week with your next update."`;
 
     const userPrompt = `Here is the data for ${store_name} for the ${weekLabel}.
 
 ${dataBlock}
 
-Write the Teloskope weekly audio brief. Remember: all numbers must be written in full spoken words. No symbols, no dollar signs, no percent signs. Start with "Good morning ${firstName}." and end with the Teloskope sign-off.`;
+Write the Teloskope weekly audio brief. Remember: all numbers must be written in full spoken words. No symbols, no dollar signs, no percent signs. Start with "Good morning ${firstName}." and end with the Teloskope sign-off. Do not include Options.`;
 
     console.log("Calling Claude...");
     const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
@@ -592,23 +649,6 @@ Write the Teloskope weekly audio brief. Remember: all numbers must be written in
 
     const rawBriefText = claudeResponse.content[0].text;
     console.log("Claude brief generated, chars:", rawBriefText.length);
-
-    // ─── EXTRACT OPTIONS FROM CLAUDE OUTPUT (page display only) ──────────────
-    const optionsMatch = rawBriefText.match(/(Option 1:[\s\S]*?)(?=That's your Teloskope|$)/i);
-    let optionsHtml = "";
-    if (optionsMatch) {
-      const items = optionsMatch[1].trim()
-        .split(/(?=Option [123]:)/i)
-        .map(s => s.trim())
-        .filter(Boolean);
-      optionsHtml =
-        `<p style="margin-bottom:8px;margin-top:16px;line-height:1.6;font-family:Inter,sans-serif;"><strong>Options to Explore:</strong></p>\n` +
-        items.map(item =>
-          `<p style="margin-bottom:12px;line-height:1.6;font-family:Inter,sans-serif;">${
-            item.replace(/Option ([123]):/i, '<strong style="color:#0205D3;">Option $1:</strong>')
-          }</p>`
-        ).join("\n");
-    }
 
     // ─── BUILD HTML BULLET SUMMARY (page display) ─────────────────────────────
     const li = (text) => `<li style="margin-bottom:6px;">${text}</li>`;
@@ -641,12 +681,9 @@ Write the Teloskope weekly audio brief. Remember: all numbers must be written in
 
     const revItems = [
       `This week (Shopify, ex-GST): ${fmt$(weekRev)} — ${weekTx} orders, AOV ${fmt$(weekAov)}`,
-      hasLyWeek
-        ? `Same week last year: ${fmt$(pcwRev)}, ${pcwTx} orders (${pct(weekRev, pcwRev)} change)`
-        : "Same week last year: not available — first year online",
       `${monthLabel} to date (Shopify, ex-GST): ${fmt$(mtdRev)} — ${mtdTx} orders`,
       hasLyMtd
-        ? `Last year MTD: ${fmt$(lyMtdRev)} (${pct(mtdRev, lyMtdRev)} change)`
+        ? `Last year MTD: ${fmt$(lyMtdRev)}, ${lyMtdTx} orders (${pct(mtdRev, lyMtdRev)} change)`
         : "Last year MTD: not available",
       `Year to date (Shopify, ex-GST): ${fmt$(ytdRev)}`,
       hasLyYtd
@@ -655,12 +692,12 @@ Write the Teloskope weekly audio brief. Remember: all numbers must be written in
     ];
 
     const cashItems = [
-      `Reconciled bank position: ${cashNote}${xeroCashBalance !== null && xeroCashBalance !== undefined && xeroCashBalance <= 0 ? " — needs attention" : ""}`,
+      `Reconciled bank position: ${cashNote}`,
     ];
 
     const txItems = [
-      `${weekTx} online transactions this week${hasLyWeek ? `, vs ${pcwTx} last year` : ""}`,
-      `Average order value (ex-GST): ${fmt$(weekAov)}${hasLyWeek ? ` vs ${fmt$(pcwAov)} last year` : ""}`,
+      `${weekTx} online transactions this week`,
+      `Average order value (ex-GST): ${fmt$(weekAov)}`,
       `${monthLabel} to date: ${mtdTx} online transactions total`,
     ];
 
@@ -678,6 +715,18 @@ Write the Teloskope weekly audio brief. Remember: all numbers must be written in
       ...locations.topStates.map(s => `${s.state}: ${s.count} order${s.count !== 1 ? "s" : ""} (${s.pct}%)`),
     ] : ["No shipping data available"];
 
+    const metaItems = (() => {
+      if (!metaWeek && !metaMtd) return ["Meta not connected or no data available"];
+      const items = [];
+      if (metaWeek) items.push(`This week: $${metaWeek.spend.toFixed(2)} spend | ${metaWeek.impressions.toLocaleString()} impressions | ${metaWeek.clicks.toLocaleString()} clicks`);
+      if (metaMtd) items.push(`Month to date: $${metaMtd.spend.toFixed(2)} spend | ${metaMtd.impressions.toLocaleString()} impressions | ${metaMtd.clicks.toLocaleString()} clicks`);
+      return items;
+    })();
+
+    // ABS macro context HTML block
+    const absHtml = `<p style="margin-bottom:8px;margin-top:16px;line-height:1.6;font-family:Inter,sans-serif;"><strong>Market Context (ABS, April 2026):</strong></p>
+<p style="margin-bottom:8px;line-height:1.6;font-family:Inter,sans-serif;">Total household spending fell 1.1% in April, driven by a 4.7% drop in transport costs (Middle East conflict impact on airfares and fuel). Clothing and footwear fell 2.2%, furnishings and household equipment was essentially flat (-0.1%). Annual spending still up 4.9% vs April 2025. <a href="https://www.abs.gov.au/media-centre/media-releases/transport-costs-drives-fall-household-spending" target="_blank" style="color:#0205D3;">ABS source</a></p>`;
+
     const briefText = [
       section("Total Sales (Xero reconciled, ex-GST):", totalSalesItems),
       section("Online Revenue (Shopify, ex-GST):", revItems),
@@ -686,7 +735,8 @@ Write the Teloskope weekly audio brief. Remember: all numbers must be written in
       section("New vs Returning Customers (online):", custItems),
       section("Top 5 Products This Week (online):", prodItems),
       section("Customer Locations (online):", locItems),
-      optionsHtml,
+      section("Meta Ads:", metaItems),
+      absHtml,
     ].join("\n");
 
     // ─── ELEVENLABS TTS ───────────────────────────────────────────────────────
@@ -749,19 +799,18 @@ Write the Teloskope weekly audio brief. Remember: all numbers must be written in
       week_end_date: wE.toISOString(),
 
       // Shopify (online-only) figures — ex-GST
-      total_week_revenue:     Math.round(weekRev * 100) / 100,
-      total_pcw_revenue:      Math.round(pcwRev * 100) / 100,
-      total_mtd_revenue:      Math.round(mtdRev * 100) / 100,
-      total_ly_mtd_revenue:   Math.round(lyMtdRev * 100) / 100,
-      shopify_ytd_revenue:    Math.round(ytdRev * 100) / 100,
-      shopify_ly_ytd_revenue: Math.round(lyYtdRev * 100) / 100,
+      total_week_revenue:      Math.round(weekRev * 100) / 100,
+      total_mtd_revenue:       Math.round(mtdRev * 100) / 100,
+      total_ly_mtd_revenue:    Math.round(lyMtdRev * 100) / 100,
+      shopify_ytd_revenue:     Math.round(ytdRev * 100) / 100,
+      shopify_ly_ytd_revenue:  Math.round(lyYtdRev * 100) / 100,
       total_week_transactions: weekTx,
-      total_mtd_transactions: mtdTx,
-      total_week_aov:         Math.round(weekAov * 100) / 100,
-      new_customers_mtd:      newMtd,
+      total_mtd_transactions:  mtdTx,
+      total_week_aov:          Math.round(weekAov * 100) / 100,
+      new_customers_mtd:       newMtd,
       returning_customers_mtd: retMtd,
-      top_products_json:      JSON.stringify(topProducts),
-      xero_cash_balance:      xeroCashBalance !== null ? Math.round(xeroCashBalance * 100) / 100 : null,
+      top_products_json:       JSON.stringify(topProducts),
+      xero_cash_balance:       xeroCashBalance !== null ? Math.round(xeroCashBalance * 100) / 100 : null,
 
       // Xero P&L total sales split
       xero_week_total_revenue: xeroWeekTotalRevenue !== null ? Math.round(xeroWeekTotalRevenue * 100) / 100 : null,
@@ -780,11 +829,10 @@ Write the Teloskope weekly audio brief. Remember: all numbers must be written in
       body: JSON.stringify(bubblePayload),
     });
 
-if (!bubbleRes.ok) throw new Error(`Bubble error ${bubbleRes.status}: ${await bubbleRes.text()}`);
+    if (!bubbleRes.ok) throw new Error(`Bubble error ${bubbleRes.status}: ${await bubbleRes.text()}`);
     const bubbleData = await bubbleRes.json();
     console.log("Bubble response:", JSON.stringify(bubbleData));
 
-    // Build the unique brief URL using the brief_id Bubble returned
     const briefUniqueId = bubbleData?.response?.brief_id;
     const fullBriefUrl = briefUniqueId
       ? `${brief_page_base_url}${briefUniqueId}`
@@ -810,7 +858,7 @@ if (!bubbleRes.ok) throw new Error(`Bubble error ${bubbleRes.status}: ${await bu
     if (!twilioRes.ok) throw new Error(`Twilio error ${twilioRes.status}: ${await twilioRes.text()}`);
     console.log("SMS sent to", user_phone);
 
-return res.status(200).json({
+    return res.status(200).json({
       success: true,
       brief_id: bubbleData?.response?.brief_id,
       brief_url: fullBriefUrl,
