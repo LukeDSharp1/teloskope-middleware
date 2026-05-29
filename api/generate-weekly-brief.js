@@ -588,12 +588,16 @@ ${topProducts.length > 0
 
 META ADS (last 7 days):
 ${metaWeek
-  ? `- Spend: $${metaWeek.spend.toFixed(2)} | Impressions: ${metaWeek.impressions.toLocaleString()} | Clicks: ${metaWeek.clicks.toLocaleString()}`
+  ? `- Spend: $${metaWeek.spend.toFixed(2)} | Impressions: ${metaWeek.impressions.toLocaleString()} | Clicks: ${metaWeek.clicks.toLocaleString()}
+- CPM: $${metaWeek.impressions > 0 ? ((metaWeek.spend / metaWeek.impressions) * 1000).toFixed(2) : "N/A"} (AU retail benchmark: $15–35)
+- CPC: $${metaWeek.clicks > 0 ? (metaWeek.spend / metaWeek.clicks).toFixed(2) : "N/A"} (AU retail benchmark: $1.50–3.00)`
   : "- Not connected or no data"}
 
 META ADS (month to date):
 ${metaMtd
-  ? `- Spend: $${metaMtd.spend.toFixed(2)} | Impressions: ${metaMtd.impressions.toLocaleString()} | Clicks: ${metaMtd.clicks.toLocaleString()}`
+  ? `- Spend: $${metaMtd.spend.toFixed(2)} | Impressions: ${metaMtd.impressions.toLocaleString()} | Clicks: ${metaMtd.clicks.toLocaleString()}
+- CPM: $${metaMtd.impressions > 0 ? ((metaMtd.spend / metaMtd.impressions) * 1000).toFixed(2) : "N/A"} (AU retail benchmark: $15–35)
+- CPC: $${metaMtd.clicks > 0 ? (metaMtd.spend / metaMtd.clicks).toFixed(2) : "N/A"} (AU retail benchmark: $1.50–3.00)`
   : "- Not connected or no data"}
 
 ${ABS_MACRO_CONTEXT}
@@ -629,6 +633,8 @@ The "Other" sales figure (in-store + wholesale) comes from Xero reconciled data 
 When last year data is not available, acknowledge it briefly and move on.
 
 MACRO CONTEXT: Include 1-2 sentences near the end referencing the ABS household spending data for the most recently reported month. Keep it relevant to the store's category. Frame it as useful market context — not alarm, not dismissal. Acknowledge it but don't dwell.
+
+META ADS: If Meta data is available, calculate CPM and CPC and briefly benchmark against AU retail averages. Give the owner a clear plain-English read on whether their spend is efficient — e.g. "your cost per click this month was one dollar eleven, which is tracking well below the typical benchmark for retail." If no spend this week but MTD spend exists, note that briefly. If zero spend across both periods, skip Meta entirely.
 
 Do NOT include any "Options to explore" section. End directly with this sign-off on a new line: "That's your Teloskope brief for the week. Have a great Monday, and I'll be back next week with your next update."`;
 
@@ -718,8 +724,16 @@ Write the Teloskope weekly audio brief. Remember: all numbers must be written in
     const metaItems = (() => {
       if (!metaWeek && !metaMtd) return ["Meta not connected or no data available"];
       const items = [];
-      if (metaWeek) items.push(`This week: $${metaWeek.spend.toFixed(2)} spend | ${metaWeek.impressions.toLocaleString()} impressions | ${metaWeek.clicks.toLocaleString()} clicks`);
-      if (metaMtd) items.push(`Month to date: $${metaMtd.spend.toFixed(2)} spend | ${metaMtd.impressions.toLocaleString()} impressions | ${metaMtd.clicks.toLocaleString()} clicks`);
+      if (metaWeek) {
+        const cpm = metaWeek.impressions > 0 ? ((metaWeek.spend / metaWeek.impressions) * 1000).toFixed(2) : "N/A";
+        const cpc = metaWeek.clicks > 0 ? (metaWeek.spend / metaWeek.clicks).toFixed(2) : "N/A";
+        items.push(`This week: $${metaWeek.spend.toFixed(2)} spend | ${metaWeek.impressions.toLocaleString()} impressions | ${metaWeek.clicks.toLocaleString()} clicks | CPM $${cpm} | CPC $${cpc}`);
+      }
+      if (metaMtd) {
+        const cpm = metaMtd.impressions > 0 ? ((metaMtd.spend / metaMtd.impressions) * 1000).toFixed(2) : "N/A";
+        const cpc = metaMtd.clicks > 0 ? (metaMtd.spend / metaMtd.clicks).toFixed(2) : "N/A";
+        items.push(`Month to date: $${metaMtd.spend.toFixed(2)} spend | ${metaMtd.impressions.toLocaleString()} impressions | ${metaMtd.clicks.toLocaleString()} clicks | CPM $${cpm} | CPC $${cpc}`);
+      }
       return items;
     })();
 
