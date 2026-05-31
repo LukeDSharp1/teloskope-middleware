@@ -612,19 +612,26 @@ Do not use any symbols, asterisks, dollar signs, percent signs, or special chara
 
 CRITICAL — NUMBER FORMATTING FOR AUDIO:
 This script will be read aloud by a text-to-speech voice. You must write ALL numbers in full spoken words so they sound natural when read aloud. Follow these rules strictly:
-- Dollar amounts: write as words e.g. "nine thousand two hundred and twenty seven dollars" not "$9,227"
+- Dollar amounts over one thousand: express in K to one decimal place — e.g. "fourteen point two K", "fifty eight point seven K". For x.5 values use "and a half" — e.g. "seventeen and a half K". Never say "fourteen thousand two hundred dollars".
+- Dollar amounts under one thousand: round to nearest dollar, state in full words — e.g. "five hundred and sixty seven dollars". Never state cents.
 - Percentages: write as words e.g. "thirteen point three percent" not "13.3%"
 - Order counts: write as words e.g. "eighteen orders" not "18 orders"
-- AOV: write as words e.g. "five hundred and thirteen dollars" not "$513"
 - All other numbers: write in full words
 
-ALL FIGURES ARE EX-GST. You can mention "ex-GST" once near the start when introducing the headline revenue, but don't repeat it every sentence.
+ALL FIGURES ARE EX-GST. You can mention "ex-GST" once near the start, but don't repeat it every sentence.
 
 The brief should take about 90 to 120 seconds to read aloud.
 
-Always open with "Good morning [owner first name]." as the very first words. Then immediately lead with the headline TOTAL sales figure for the week (online plus other combined) in full words, noting it's ex-GST.
-
-Cover, in this order: total sales for the week split into online and other (in-store plus wholesale combined), online performance this week, MTD total sales split into online and other with last year MTD comparison, reconciled bank balance (state the number and note it is at last reconciled date — do not evaluate or comment on whether it is healthy or concerning), transactions and AOV, customer mix MTD vs last year MTD, where customers are from, top products this week, Meta ads spend this week and MTD (if available — if no spend, mention briefly and move on).
+STRUCTURE — follow this order exactly:
+1. Open with "Good morning [owner first name]." then immediately give 1-2 sentences of ABS macro context relevant to the store's category — frame it as a consultant setting the scene before the meeting. Not alarming, not dismissive. End with a bridging sentence like "Against that backdrop, here's how [store name] traded this week."
+2. Total sales for the week (online plus other combined, ex-GST), split into online and other.
+3. MTD total sales split into online and other, with last year MTD comparison and brief commentary on the trend.
+4. Reconciled bank balance — state the number and note it is at last reconciled date. No evaluative commentary whatsoever.
+5. Online transactions and AOV this week.
+6. Customer mix MTD vs last year MTD.
+7. Top products this week.
+8. Meta ads — see META ADS instruction below.
+9. Close with one ABS category-specific context sentence, then sign-off.
 
 CASH BALANCE INSTRUCTION: Simply state the bank balance figure and that it is at last reconciled date. Do not add any evaluative commentary — no "that's healthy", no "needs attention", no qualitative judgement of any kind.
 
@@ -632,9 +639,7 @@ The "Other" sales figure (in-store + wholesale) comes from Xero reconciled data 
 
 When last year data is not available, acknowledge it briefly and move on.
 
-MACRO CONTEXT: Include 1-2 sentences near the end referencing the ABS household spending data for the most recently reported month. Keep it relevant to the store's category. Frame it as useful market context — not alarm, not dismissal. Acknowledge it but don't dwell.
-
-META ADS: If Meta data is available, calculate CPM and CPC and briefly benchmark against AU retail averages. Give the owner a clear plain-English read on whether their spend is efficient — e.g. "your cost per click this month was one dollar eleven, which is tracking well below the typical benchmark for retail." If no spend this week but MTD spend exists, note that briefly. If zero spend across both periods, skip Meta entirely.
+META ADS: If Meta data is available, report spend for the week and MTD. State the CPM and CPC figures and explicitly benchmark them against AU retail averages — e.g. "your cost per click this month was one dollar eleven, against an Australian retail benchmark of one dollar fifty to three dollars — well inside that range. Your cost per thousand impressions was twenty eight dollars, against a benchmark of fifteen to thirty five dollars — again solid." If no spend this week but MTD spend exists, note that briefly then give the MTD benchmark read. If zero spend across both periods, skip Meta entirely.
 
 Do NOT include any "Options to explore" section. End directly with this sign-off on a new line: "That's your Teloskope brief for the week. Have a great Monday, and I'll be back next week with your next update."`;
 
@@ -642,7 +647,7 @@ Do NOT include any "Options to explore" section. End directly with this sign-off
 
 ${dataBlock}
 
-Write the Teloskope weekly audio brief. Remember: all numbers must be written in full spoken words. No symbols, no dollar signs, no percent signs. Start with "Good morning ${firstName}." and end with the Teloskope sign-off. Do not include Options.`;
+Write the Teloskope weekly audio brief. Follow the structure order exactly. Express all dollar amounts over one thousand in K format. Under one thousand, full words, no cents. No symbols, no dollar signs, no percent signs. Start with "Good morning ${firstName}." followed immediately by the ABS macro context. End with the Teloskope sign-off. Do not include Options.`;
 
     console.log("Calling Claude...");
     const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
