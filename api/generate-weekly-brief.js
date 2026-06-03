@@ -448,7 +448,7 @@ export default async function handler(req, res) {
       xeroAvailable ? fetchXeroTotalRevenue(wS, wE, xero_access_token, xero_tenant_id, xero_refresh_token, xero_connection_id) : Promise.resolve(null),
       xeroAvailable ? fetchXeroTotalRevenue(mS, mE, xero_access_token, xero_tenant_id, xero_refresh_token, xero_connection_id) : Promise.resolve(null),
       fetchMetaInsights(meta_access_token, meta_ad_account_id, "last_7d"),
-      fetchMetaInsights(meta_access_token, meta_ad_account_id, "this_month"),
+      fetchMetaInsights(meta_access_token, meta_ad_account_id, "last_30d"),
     ]);
 
     console.log("Week orders:", weekOrders.length, "| Revenue ex-GST:", sumRevenueExGst(weekOrders).toFixed(2));
@@ -522,7 +522,8 @@ export default async function handler(req, res) {
 
     const weekLabel  = `week ending ${fmtDate(weekEnd)}`;
     const monthLabel = fmtDate({ year: weekEnd.year, month: weekEnd.month, day: 1 }, { month: "long", year: "numeric" });
-    const cashNote   = xeroCashBalance !== null && xeroCashBalance !== undefined
+    const cashNum  = xeroCashBalance !== null && xeroCashBalance !== undefined ? fmt$(xeroCashBalance) : null;
+    const cashNote = xeroCashBalance !== null && xeroCashBalance !== undefined
       ? `${fmt$(xeroCashBalance)} at last reconciled date`
       : "not available";
 
@@ -669,7 +670,19 @@ Write the Teloskope weekly audio brief. Follow the structure order exactly. Expr
     const metaMtdCpm  = metaMtd  && metaMtd.impressions  > 0 ? ((metaMtd.spend  / metaMtd.impressions)  * 1000) : null;
     const metaMtdCpc  = metaMtd  && metaMtd.clicks  > 0 ? (metaMtd.spend  / metaMtd.clicks)  : null;
 
-    const hasMetaData = (metaMtd && metaMtd.spend > 0) || (metaWeek && metaWeek.spend > 0);
+    const hasMetaData = true; // Always show Meta section — zero spend is informative
+
+    // ─── STATE ABBREVIATION MAP ───────────────────────────────────────────────
+    const stateAbbr = (name) => {
+      const map = {
+        "New South Wales": "NSW", "Victoria": "VIC", "Queensland": "QLD",
+        "Western Australia": "WA", "South Australia": "SA", "Tasmania": "TAS",
+        "Australian Capital Territory": "ACT", "Northern Territory": "NT",
+        "NSW": "NSW", "VIC": "VIC", "QLD": "QLD", "WA": "WA",
+        "SA": "SA", "TAS": "TAS", "ACT": "ACT", "NT": "NT",
+      };
+      return map[name] || name.substring(0, 3).toUpperCase();
+    };
 
     // ─── TOP PRODUCTS BAR DATA ────────────────────────────────────────────────
     const maxQty = topProducts.length > 0 ? topProducts[0].quantity : 1;
@@ -689,7 +702,7 @@ Write the Teloskope weekly audio brief. Follow the structure order exactly. Expr
     const locBars = locations.topStates.slice(0, 3).map((s, i) => {
       const fills = ["#378ADD", "#85B7EB", "#B5D4F4"];
       return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-        <span style="font-size:12px;color:#888780;width:36px;flex-shrink:0">${s.state.substring(0,3)}</span>
+        <span style="font-size:12px;color:#888780;width:36px;flex-shrink:0">${stateAbbr(s.state)}</span>
         <div style="flex:1;height:16px;background:#F1EFE8;border-radius:4px;overflow:hidden">
           <div style="width:${s.pct}%;height:100%;background:${fills[i]};border-radius:4px"></div>
         </div>
@@ -703,14 +716,12 @@ Write the Teloskope weekly audio brief. Follow the structure order exactly. Expr
     const mtdChangeColor = mtdChange !== null ? (mtdChange >= 0 ? "#0F6E56" : "#A32D2D") : "#888780";
 
     // ─── META BENCHMARK HTML ─────────────────────────────────────────────────
-    const metaSection = hasMetaData ? (() => {
-      const spend = metaMtd ? metaMtd.spend : metaWeek ? metaWeek.spend : 0;
-      const cpm   = metaMtdCpm ?? metaWeekCpm;
-      const cpc   = metaMtdCpc ?? metaWeekCpc;
-      const cpcPct  = cpc  !== null ? Math.min(Math.max(((cpc - 1.5) / (3.0 - 1.5)) * 100, 0), 100) : null;
-      const cpmPct  = cpm  !== null ? Math.min(Math.max(((cpm - 15)  / (35  - 15))  * 100, 0), 100) : null;
-      const cpcGood = cpc !== null && cpc < 1.5;
-      const cpmGood = cpm !== null && cpm < 28;
+    const metaSection = (() => {
+      const spend30 = metaMtd ? metaMtd.spend : 0;
+      const spend7  = metaWeek ? metaWeek.spend : 0;
+      const cpm = metaMtdCpm ?? metaWeekCpm;
+      const cpc = metaMtdCpc ?? metaWeekCpc;
+      const hasSpend = spend30 > 0 || spend7 > 0;
 
       const benchmarkRow = (label, val, pct, good, low, high, unit) => pct !== null ? `
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
@@ -724,18 +735,24 @@ Write the Teloskope weekly audio brief. Follow the structure order exactly. Expr
           <span>${unit}${low} ${good ? "✓ below benchmark" : "↑ above benchmark"}</span><span>${unit}${high}</span>
         </div>` : "";
 
+      const cpcPct = cpc !== null ? Math.min(Math.max(((cpc - 1.5) / (3.0 - 1.5)) * 100, 0), 100) : null;
+      const cpmPct = cpm !== null ? Math.min(Math.max(((cpm - 15)  / (35  - 15))  * 100, 0), 100) : null;
+      const cpcGood = cpc !== null && cpc < 1.5;
+      const cpmGood = cpm !== null && cpm < 28;
+
       return `
       <div style="margin-bottom:20px">
-        <p style="font-size:11px;font-weight:500;color:#888780;letter-spacing:.06em;text-transform:uppercase;margin-bottom:8px">Meta ads — month to date</p>
+        <p style="font-size:11px;font-weight:500;color:#888780;letter-spacing:.06em;text-transform:uppercase;margin-bottom:8px">Meta ads — last 30 days</p>
         <div style="background:#fff;border:0.5px solid #D3D1C7;border-radius:12px;padding:14px 16px">
+          ${hasSpend ? `
           <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-bottom:12px">
             <div style="background:#F1EFE8;border-radius:8px;padding:12px">
-              <p style="font-size:12px;color:#888780;margin-bottom:4px">MTD spend</p>
-              <p style="font-size:20px;font-weight:500">$${Math.round(spend)}</p>
+              <p style="font-size:12px;color:#888780;margin-bottom:4px">30 day spend</p>
+              <p style="font-size:20px;font-weight:500">$${Math.round(spend30 || spend7)}</p>
             </div>
             <div style="background:#F1EFE8;border-radius:8px;padding:12px">
               <p style="font-size:12px;color:#888780;margin-bottom:4px">Clicks</p>
-              <p style="font-size:20px;font-weight:500">${(metaMtd ? metaMtd.clicks : metaWeek ? metaWeek.clicks : 0).toLocaleString()}</p>
+              <p style="font-size:20px;font-weight:500">${((metaMtd ? metaMtd.clicks : 0) || (metaWeek ? metaWeek.clicks : 0)).toLocaleString()}</p>
             </div>
           </div>
           <p style="font-size:12px;color:#888780;margin-bottom:8px">vs AU retail benchmark</p>
@@ -744,10 +761,12 @@ Write the Teloskope weekly audio brief. Follow the structure order exactly. Expr
           <div style="margin-top:8px">
             ${cpcGood ? `<span style="display:inline-block;font-size:11px;padding:3px 8px;border-radius:20px;margin-right:4px;background:#E1F5EE;color:#085041">CPC well below benchmark</span>` : ""}
             ${cpmGood ? `<span style="display:inline-block;font-size:11px;padding:3px 8px;border-radius:20px;background:#E1F5EE;color:#085041">CPM solid</span>` : ""}
-          </div>
+          </div>` : `
+          <p style="font-size:13px;color:#888780;margin-bottom:6px">No active campaigns in the last 30 days.</p>
+          <p style="font-size:13px;color:#5F5E5A;line-height:1.5">When your ads are running, Teloskope will benchmark your cost per click and cost per thousand impressions against AU retail averages — so you always know if your spend is working.</p>`}
         </div>
       </div>`;
-    })() : "";
+    })();
 
     // ─── VISUAL BRIEF HTML ────────────────────────────────────────────────────
     const briefText = `
@@ -847,7 +866,7 @@ Write the Teloskope weekly audio brief. Follow the structure order exactly. Expr
   <div class="tlsk-section">
     <p class="tlsk-label">Reconciled cash</p>
     <div class="tlsk-card">
-      <p class="tlsk-hero">${cashNote}</p>
+      ${cashNum ? `<p class="tlsk-hero">${cashNum}</p><p class="tlsk-sub" style="margin-top:6px">At last reconciled date</p>` : `<p style="font-size:14px;color:#888780">Not available — Xero not connected</p>`}
     </div>
   </div>
 
