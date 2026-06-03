@@ -342,13 +342,15 @@ export default async function handler(req, res) {
     const weekEnd   = shiftDays(today, -daysBackToSunday);
     const weekStart = shiftDays(weekEnd, -6);
 
-    const mtdStart   = { year: today.year, month: today.month, day: 1 };
-    const mtdEnd     = today;
+    // MTD anchored to weekEnd month — not today — so Monday runs don't flip to new month
+    const mtdStart   = { year: weekEnd.year, month: weekEnd.month, day: 1 };
+    const mtdEnd     = weekEnd;
     const lyMtdStart = shiftYear(mtdStart, -1);
     const lyMtdEnd   = shiftYear(mtdEnd, -1);
 
-    const ytdStart   = { year: today.year, month: 0, day: 1 };
-    const ytdEnd     = today;
+    // YTD anchored to weekEnd year
+    const ytdStart   = { year: weekEnd.year, month: 0, day: 1 };
+    const ytdEnd     = weekEnd;
     const lyYtdStart = shiftYear(ytdStart, -1);
     const lyYtdEnd   = shiftYear(ytdEnd, -1);
 
@@ -519,7 +521,7 @@ export default async function handler(req, res) {
     const hasLyYtd  = lyYtdRev > 0;
 
     const weekLabel  = `week ending ${fmtDate(weekEnd)}`;
-    const monthLabel = fmtDate({ year: today.year, month: today.month, day: 1 }, { month: "long", year: "numeric" });
+    const monthLabel = fmtDate({ year: weekEnd.year, month: weekEnd.month, day: 1 }, { month: "long", year: "numeric" });
     const cashNote   = xeroCashBalance !== null && xeroCashBalance !== undefined
       ? `${fmt$(xeroCashBalance)} at last reconciled date`
       : "not available";
@@ -661,102 +663,258 @@ Write the Teloskope weekly audio brief. Follow the structure order exactly. Expr
     const rawBriefText = claudeResponse.content[0].text;
     console.log("Claude brief generated, chars:", rawBriefText.length);
 
-    // ─── BUILD HTML BULLET SUMMARY (page display) ─────────────────────────────
-    const li = (text) => `<li style="margin-bottom:6px;">${text}</li>`;
-    const section = (title, items) =>
-      `<p style="margin-bottom:8px;margin-top:16px;line-height:1.6;font-family:Inter,sans-serif;"><strong>${title}</strong></p>\n` +
-      `<ul style="margin:0 0 8px 0;padding-left:20px;line-height:1.8;font-family:Inter,sans-serif;">\n` +
-      items.map(li).join("\n") +
-      `\n</ul>`;
+    // ─── META CALCULATIONS ────────────────────────────────────────────────────
+    const metaWeekCpm = metaWeek && metaWeek.impressions > 0 ? ((metaWeek.spend / metaWeek.impressions) * 1000) : null;
+    const metaWeekCpc = metaWeek && metaWeek.clicks > 0 ? (metaWeek.spend / metaWeek.clicks) : null;
+    const metaMtdCpm  = metaMtd  && metaMtd.impressions  > 0 ? ((metaMtd.spend  / metaMtd.impressions)  * 1000) : null;
+    const metaMtdCpc  = metaMtd  && metaMtd.clicks  > 0 ? (metaMtd.spend  / metaMtd.clicks)  : null;
 
-    // Total sales section
-    const totalSalesItems = (() => {
-      if (xeroWeekTotalRevenue === null || xeroWeekTotalRevenue === undefined) {
-        return ["Xero P&L not available — total sales view unavailable"];
-      }
-      const items = [];
-      items.push(`This week (Xero, ex-GST): ${fmt$(xeroWeekTotalRevenue)} total`);
-      items.push(`  · Online (Shopify): ${fmt$(weekRev)}${weekOnlinePct !== null ? ` (${fmtPct(weekOnlinePct)})` : ""}`);
-      if (weekOtherSales !== null) {
-        items.push(`  · Other (in-store + wholesale): ${fmt$(weekOtherSales)}${weekOtherPct !== null ? ` (${fmtPct(weekOtherPct)})` : ""}`);
-      }
-      if (xeroMtdTotalRevenue !== null && xeroMtdTotalRevenue !== undefined) {
-        items.push(`${monthLabel} to date (Xero, ex-GST): ${fmt$(xeroMtdTotalRevenue)} total`);
-        items.push(`  · Online (Shopify): ${fmt$(mtdRev)}${mtdOnlinePct !== null ? ` (${fmtPct(mtdOnlinePct)})` : ""}`);
-        if (mtdOtherSales !== null) {
-          items.push(`  · Other (in-store + wholesale): ${fmt$(mtdOtherSales)}${mtdOtherPct !== null ? ` (${fmtPct(mtdOtherPct)})` : ""}`);
-        }
-      }
-      return items;
-    })();
+    const hasMetaData = (metaMtd && metaMtd.spend > 0) || (metaWeek && metaWeek.spend > 0);
 
-    const revItems = [
-      `This week (Shopify, ex-GST): ${fmt$(weekRev)} — ${weekTx} orders, AOV ${fmt$(weekAov)}`,
-      `${monthLabel} to date (Shopify, ex-GST): ${fmt$(mtdRev)} — ${mtdTx} orders`,
-      hasLyMtd
-        ? `Last year MTD: ${fmt$(lyMtdRev)}, ${lyMtdTx} orders (${pct(mtdRev, lyMtdRev)} change)`
-        : "Last year MTD: not available",
-      `Year to date (Shopify, ex-GST): ${fmt$(ytdRev)}`,
-      hasLyYtd
-        ? `Last year YTD: ${fmt$(lyYtdRev)} (${pct(ytdRev, lyYtdRev)} change)`
-        : "Last year YTD: not available — first year online",
-    ];
+    // ─── TOP PRODUCTS BAR DATA ────────────────────────────────────────────────
+    const maxQty = topProducts.length > 0 ? topProducts[0].quantity : 1;
+    const prodBars = topProducts.slice(0, 5).map(p => {
+      const pct = Math.round((p.quantity / maxQty) * 100);
+      const shortTitle = p.title.length > 18 ? p.title.substring(0, 17) + "…" : p.title;
+      return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+        <span style="font-size:12px;color:#888780;width:100px;flex-shrink:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${shortTitle}</span>
+        <div style="flex:1;height:20px;background:#F1EFE8;border-radius:4px;overflow:hidden">
+          <div style="width:${pct}%;height:100%;background:#378ADD;border-radius:4px"></div>
+        </div>
+        <span style="font-size:12px;font-weight:500;width:32px;text-align:right;flex-shrink:0">${p.quantity}u</span>
+      </div>`;
+    }).join("");
 
-    const cashItems = [
-      `Reconciled bank position: ${cashNote}`,
-    ];
+    // ─── LOCATION BARS ────────────────────────────────────────────────────────
+    const locBars = locations.topStates.slice(0, 3).map((s, i) => {
+      const fills = ["#378ADD", "#85B7EB", "#B5D4F4"];
+      return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+        <span style="font-size:12px;color:#888780;width:36px;flex-shrink:0">${s.state.substring(0,3)}</span>
+        <div style="flex:1;height:16px;background:#F1EFE8;border-radius:4px;overflow:hidden">
+          <div style="width:${s.pct}%;height:100%;background:${fills[i]};border-radius:4px"></div>
+        </div>
+        <span style="font-size:12px;font-weight:500;width:28px;text-align:right;flex-shrink:0">${s.pct}%</span>
+      </div>`;
+    }).join("");
 
-    const txItems = [
-      `${weekTx} online transactions this week`,
-      `Average order value (ex-GST): ${fmt$(weekAov)}`,
-      `${monthLabel} to date: ${mtdTx} online transactions total`,
-    ];
+    // ─── MTD CHANGE COLOUR ────────────────────────────────────────────────────
+    const mtdChange = hasLyMtd ? (((mtdRev - lyMtdRev) / lyMtdRev) * 100) : null;
+    const mtdChangeStr = mtdChange !== null ? `${mtdChange > 0 ? "▲" : "▼"} ${Math.abs(mtdChange).toFixed(1)}% vs last year` : "";
+    const mtdChangeColor = mtdChange !== null ? (mtdChange >= 0 ? "#0F6E56" : "#A32D2D") : "#888780";
 
-    const custItems = [
-      `${newMtd} new customers this month${hasLyMtd ? ` vs ${newLyMtd} last year` : ""}`,
-      `${retMtd} returning customers${hasLyMtd ? ` vs ${retLyMtd} last year` : ""}`,
-    ];
+    // ─── META BENCHMARK HTML ─────────────────────────────────────────────────
+    const metaSection = hasMetaData ? (() => {
+      const spend = metaMtd ? metaMtd.spend : metaWeek ? metaWeek.spend : 0;
+      const cpm   = metaMtdCpm ?? metaWeekCpm;
+      const cpc   = metaMtdCpc ?? metaWeekCpc;
+      const cpcPct  = cpc  !== null ? Math.min(Math.max(((cpc - 1.5) / (3.0 - 1.5)) * 100, 0), 100) : null;
+      const cpmPct  = cpm  !== null ? Math.min(Math.max(((cpm - 15)  / (35  - 15))  * 100, 0), 100) : null;
+      const cpcGood = cpc !== null && cpc < 1.5;
+      const cpmGood = cpm !== null && cpm < 28;
 
-    const prodItems = topProducts.length > 0
-      ? topProducts.map(p => `${p.title} — ${p.quantity} units`)
-      : ["No orders this week"];
+      const benchmarkRow = (label, val, pct, good, low, high, unit) => pct !== null ? `
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+          <span style="font-size:11px;color:#888780;width:36px;flex-shrink:0">${label}</span>
+          <div style="flex:1;height:8px;background:#B5D4F4;border-radius:4px;position:relative">
+            <div style="position:absolute;width:3px;height:14px;top:-3px;left:${pct}%;background:#185FA5;border-radius:2px;transform:translateX(-50%)"></div>
+          </div>
+          <span style="font-size:12px;font-weight:500;width:44px;text-align:right;flex-shrink:0">${unit}${val.toFixed(2)}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:10px;color:#888780;margin-bottom:10px;padding-left:44px">
+          <span>${unit}${low} ${good ? "✓ below benchmark" : "↑ above benchmark"}</span><span>${unit}${high}</span>
+        </div>` : "";
 
-    const locItems = locations.total > 0 ? [
-      `Australia: ${locations.ausPct}% | Overseas: ${locations.overseaPct}%`,
-      ...locations.topStates.map(s => `${s.state}: ${s.count} order${s.count !== 1 ? "s" : ""} (${s.pct}%)`),
-    ] : ["No shipping data available"];
+      return `
+      <div style="margin-bottom:20px">
+        <p style="font-size:11px;font-weight:500;color:#888780;letter-spacing:.06em;text-transform:uppercase;margin-bottom:8px">Meta ads — month to date</p>
+        <div style="background:#fff;border:0.5px solid #D3D1C7;border-radius:12px;padding:14px 16px">
+          <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-bottom:12px">
+            <div style="background:#F1EFE8;border-radius:8px;padding:12px">
+              <p style="font-size:12px;color:#888780;margin-bottom:4px">MTD spend</p>
+              <p style="font-size:20px;font-weight:500">$${Math.round(spend)}</p>
+            </div>
+            <div style="background:#F1EFE8;border-radius:8px;padding:12px">
+              <p style="font-size:12px;color:#888780;margin-bottom:4px">Clicks</p>
+              <p style="font-size:20px;font-weight:500">${(metaMtd ? metaMtd.clicks : metaWeek ? metaWeek.clicks : 0).toLocaleString()}</p>
+            </div>
+          </div>
+          <p style="font-size:12px;color:#888780;margin-bottom:8px">vs AU retail benchmark</p>
+          ${benchmarkRow("CPC", cpc, cpcPct, cpcGood, "1.50", "3.00", "$")}
+          ${benchmarkRow("CPM", cpm, cpmPct, cpmGood, "15", "35", "$")}
+          <div style="margin-top:8px">
+            ${cpcGood ? `<span style="display:inline-block;font-size:11px;padding:3px 8px;border-radius:20px;margin-right:4px;background:#E1F5EE;color:#085041">CPC well below benchmark</span>` : ""}
+            ${cpmGood ? `<span style="display:inline-block;font-size:11px;padding:3px 8px;border-radius:20px;background:#E1F5EE;color:#085041">CPM solid</span>` : ""}
+          </div>
+        </div>
+      </div>`;
+    })() : "";
 
-    const metaItems = (() => {
-      if (!metaWeek && !metaMtd) return ["Meta not connected or no data available"];
-      const items = [];
-      if (metaWeek) {
-        const cpm = metaWeek.impressions > 0 ? ((metaWeek.spend / metaWeek.impressions) * 1000).toFixed(2) : "N/A";
-        const cpc = metaWeek.clicks > 0 ? (metaWeek.spend / metaWeek.clicks).toFixed(2) : "N/A";
-        items.push(`This week: $${metaWeek.spend.toFixed(2)} spend | ${metaWeek.impressions.toLocaleString()} impressions | ${metaWeek.clicks.toLocaleString()} clicks | CPM $${cpm} | CPC $${cpc}`);
-      }
-      if (metaMtd) {
-        const cpm = metaMtd.impressions > 0 ? ((metaMtd.spend / metaMtd.impressions) * 1000).toFixed(2) : "N/A";
-        const cpc = metaMtd.clicks > 0 ? (metaMtd.spend / metaMtd.clicks).toFixed(2) : "N/A";
-        items.push(`Month to date: $${metaMtd.spend.toFixed(2)} spend | ${metaMtd.impressions.toLocaleString()} impressions | ${metaMtd.clicks.toLocaleString()} clicks | CPM $${cpm} | CPC $${cpc}`);
-      }
-      return items;
-    })();
+    // ─── VISUAL BRIEF HTML ────────────────────────────────────────────────────
+    const briefText = `
+<style>
+.tlsk-page{font-family:Inter,-apple-system,sans-serif;padding:0;max-width:420px;margin:0 auto}
+.tlsk-section{margin-bottom:20px}
+.tlsk-label{font-size:11px;font-weight:500;color:#888780;letter-spacing:.06em;text-transform:uppercase;margin-bottom:8px}
+.tlsk-card{background:#fff;border:0.5px solid #D3D1C7;border-radius:12px;padding:14px 16px;margin-bottom:10px}
+.tlsk-grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.tlsk-metric{background:#F1EFE8;border-radius:8px;padding:12px}
+.tlsk-metric-label{font-size:12px;color:#888780;margin-bottom:4px}
+.tlsk-metric-val{font-size:22px;font-weight:500;color:#2C2C2A;line-height:1}
+.tlsk-hero{font-size:30px;font-weight:500;color:#2C2C2A;line-height:1}
+.tlsk-sub{font-size:13px;color:#888780;margin-top:2px}
+.tlsk-divider{height:0.5px;background:#D3D1C7;margin:10px 0}
+</style>
 
-    // ABS macro context HTML block
-    const absHtml = `<p style="margin-bottom:8px;margin-top:16px;line-height:1.6;font-family:Inter,sans-serif;"><strong>Market Context (ABS, April 2026):</strong></p>
-<p style="margin-bottom:8px;line-height:1.6;font-family:Inter,sans-serif;">Total household spending fell 1.1% in April, driven by a 4.7% drop in transport costs (Middle East conflict impact on airfares and fuel). Clothing and footwear fell 2.2%, furnishings and household equipment was essentially flat (-0.1%). Annual spending still up 4.9% vs April 2025. <a href="https://www.abs.gov.au/media-centre/media-releases/transport-costs-drives-fall-household-spending" target="_blank" style="color:#0205D3;">ABS source</a></p>`;
+<div class="tlsk-page">
 
-    const briefText = [
-      section("Total Sales (Xero reconciled, ex-GST):", totalSalesItems),
-      section("Online Revenue (Shopify, ex-GST):", revItems),
-      section("Reconciled Bank Position:", cashItems),
-      section("Online Transactions and AOV:", txItems),
-      section("New vs Returning Customers (online):", custItems),
-      section("Top 5 Products This Week (online):", prodItems),
-      section("Customer Locations (online):", locItems),
-      section("Meta Ads:", metaItems),
-      absHtml,
-    ].join("\n");
+  <div class="tlsk-section">
+    <p class="tlsk-label">Market context — ABS April 2026</p>
+    <div style="background:#fff;border:0.5px solid #D3D1C7;border-left:3px solid #B5D4F4;border-radius:0 12px 12px 0;padding:12px 14px">
+      <p style="font-size:13px;color:#5F5E5A;line-height:1.6;margin-bottom:6px">Household spending fell 1.1% in April. Clothing &amp; footwear down 2.2%, furnishings essentially flat. Annual spending still up 4.9% year on year.</p>
+      <a href="https://www.abs.gov.au/media-centre/media-releases/transport-costs-drives-fall-household-spending" target="_blank" style="font-size:12px;color:#185FA5;text-decoration:none">ABS source ↗</a>
+    </div>
+  </div>
+
+  <div class="tlsk-section">
+    <p class="tlsk-label">Total sales this week</p>
+    <div class="tlsk-card">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px">
+        <div>
+          <p class="tlsk-hero">${xeroWeekTotalRevenue !== null ? fmt$(xeroWeekTotalRevenue) : fmt$(weekRev)}</p>
+          <p class="tlsk-sub">Xero reconciled, ex-GST</p>
+        </div>
+        <span style="font-size:11px;padding:4px 10px;border-radius:20px;background:#E6F1FB;color:#0C447C">${weekLabel}</span>
+      </div>
+      <div class="tlsk-divider"></div>
+      ${xeroWeekTotalRevenue !== null ? `
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+        <span style="font-size:12px;color:#888780;width:70px;flex-shrink:0">Online</span>
+        <div style="flex:1;height:20px;background:#F1EFE8;border-radius:4px;overflow:hidden">
+          <div style="width:${weekOnlinePct !== null ? Math.round(weekOnlinePct * 100) : 60}%;height:100%;background:#378ADD;border-radius:4px"></div>
+        </div>
+        <span style="font-size:12px;font-weight:500;width:60px;text-align:right;flex-shrink:0">${fmt$(weekRev)}</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="font-size:12px;color:#888780;width:70px;flex-shrink:0">In-store</span>
+        <div style="flex:1;height:20px;background:#F1EFE8;border-radius:4px;overflow:hidden">
+          <div style="width:${weekOtherPct !== null ? Math.round(weekOtherPct * 100) : 40}%;height:100%;background:#B5D4F4;border-radius:4px"></div>
+        </div>
+        <span style="font-size:12px;font-weight:500;width:60px;text-align:right;flex-shrink:0">${weekOtherSales !== null ? fmt$(weekOtherSales) : "—"}</span>
+      </div>` : `<p style="font-size:13px;color:#888780">Xero not connected — showing online only</p>`}
+    </div>
+  </div>
+
+  <div class="tlsk-section">
+    <p class="tlsk-label">Month to date — ${monthLabel}</p>
+    <div class="tlsk-grid2" style="margin-bottom:10px">
+      <div class="tlsk-metric">
+        <p class="tlsk-metric-label">Total sales</p>
+        <p class="tlsk-metric-val">${xeroMtdTotalRevenue !== null ? fmt$(xeroMtdTotalRevenue) : fmt$(mtdRev)}</p>
+        <p style="font-size:12px;margin-top:4px;color:#888780">Xero reconciled</p>
+      </div>
+      <div class="tlsk-metric">
+        <p class="tlsk-metric-label">vs last year</p>
+        <p class="tlsk-metric-val" style="color:${mtdChangeColor}">${mtdChange !== null ? `${mtdChange > 0 ? "+" : ""}${mtdChange.toFixed(1)}%` : "—"}</p>
+        <p style="font-size:12px;margin-top:4px;color:${mtdChangeColor}">${mtdChangeStr}</p>
+      </div>
+    </div>
+    ${hasLyMtd ? `
+    <div class="tlsk-card" style="padding:12px 14px">
+      <p style="font-size:12px;color:#888780;margin-bottom:10px">Online MTD vs last year (Shopify)</p>
+      <div style="display:flex;gap:8px;align-items:flex-end;height:60px;margin-bottom:6px">
+        <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px">
+          <div style="width:100%;background:#378ADD;border-radius:4px 4px 0 0" style2="height:${Math.round((mtdRev / Math.max(mtdRev, lyMtdRev)) * 56)}px">
+            <div style="height:${Math.round((mtdRev / Math.max(mtdRev, lyMtdRev)) * 56)}px;background:#378ADD;border-radius:4px 4px 0 0"></div>
+          </div>
+        </div>
+        <div style="flex:1">
+          <div style="height:${Math.round((lyMtdRev / Math.max(mtdRev, lyMtdRev)) * 56)}px;background:#B5D4F4;border-radius:4px 4px 0 0"></div>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px">
+        <div style="flex:1;text-align:center">
+          <p style="font-size:13px;font-weight:500;color:#2C2C2A">${fmt$(mtdRev)}</p>
+          <p style="font-size:11px;color:#888780">This year</p>
+        </div>
+        <div style="flex:1;text-align:center">
+          <p style="font-size:13px;font-weight:500;color:#2C2C2A">${fmt$(lyMtdRev)}</p>
+          <p style="font-size:11px;color:#888780">Last year</p>
+        </div>
+      </div>
+    </div>` : ""}
+  </div>
+
+  <div class="tlsk-section">
+    <p class="tlsk-label">Reconciled cash</p>
+    <div class="tlsk-card">
+      <p class="tlsk-hero">${cashNote}</p>
+    </div>
+  </div>
+
+  <div class="tlsk-section">
+    <p class="tlsk-label">Transactions &amp; AOV</p>
+    <div class="tlsk-grid2">
+      <div class="tlsk-metric">
+        <p class="tlsk-metric-label">Orders this week</p>
+        <p class="tlsk-metric-val">${weekTx}</p>
+        <p style="font-size:12px;margin-top:4px;color:#888780">online</p>
+      </div>
+      <div class="tlsk-metric">
+        <p class="tlsk-metric-label">Avg order value</p>
+        <p class="tlsk-metric-val">${fmt$(weekAov)}</p>
+        <p style="font-size:12px;margin-top:4px;color:#888780">ex-GST</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="tlsk-section">
+    <p class="tlsk-label">Customers — ${monthLabel}</p>
+    <div class="tlsk-card" style="padding:12px 14px">
+      <div style="display:flex;gap:12px;margin-bottom:12px">
+        <div style="flex:1;text-align:center">
+          <p style="font-size:28px;font-weight:500;color:#0F6E56">${newMtd}</p>
+          <p style="font-size:11px;color:#888780">New</p>
+          ${hasLyMtd ? `<p style="font-size:11px;color:${newMtd >= newLyMtd ? "#0F6E56" : "#A32D2D"}">${newMtd >= newLyMtd ? "▲" : "▼"} vs ${newLyMtd} LY</p>` : ""}
+        </div>
+        <div style="width:0.5px;background:#D3D1C7"></div>
+        <div style="flex:1;text-align:center">
+          <p style="font-size:28px;font-weight:500;color:${retMtd >= (hasLyMtd ? retLyMtd : retMtd) ? "#0F6E56" : "#A32D2D"}">${retMtd}</p>
+          <p style="font-size:11px;color:#888780">Returning</p>
+          ${hasLyMtd ? `<p style="font-size:11px;color:${retMtd >= retLyMtd ? "#0F6E56" : "#A32D2D"}">${retMtd >= retLyMtd ? "▲" : "▼"} vs ${retLyMtd} LY</p>` : ""}
+        </div>
+      </div>
+      ${(newMtd + retMtd) > 0 ? `
+      <div style="height:8px;background:#F1EFE8;border-radius:4px;overflow:hidden">
+        <div style="height:100%;width:${Math.round((newMtd / (newMtd + retMtd)) * 100)}%;background:#1D9E75;border-radius:4px"></div>
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:11px;color:#888780;margin-top:4px">
+        <span>New ${Math.round((newMtd / (newMtd + retMtd)) * 100)}%</span>
+        <span>Returning ${Math.round((retMtd / (newMtd + retMtd)) * 100)}%</span>
+      </div>` : ""}
+    </div>
+  </div>
+
+  <div class="tlsk-section">
+    <p class="tlsk-label">Top products this week</p>
+    <div class="tlsk-card" style="padding:12px 14px">
+      ${topProducts.length > 0 ? prodBars : '<p style="font-size:13px;color:#888780">No orders this week</p>'}
+    </div>
+  </div>
+
+  <div class="tlsk-section">
+    <p class="tlsk-label">Customer locations</p>
+    <div class="tlsk-card" style="padding:12px 14px">
+      <div style="display:flex;justify-content:space-between;margin-bottom:10px">
+        <span style="font-size:13px;color:#2C2C2A">Australia <strong>${locations.ausPct}%</strong></span>
+        <span style="font-size:13px;color:#2C2C2A">Overseas <strong>${locations.overseaPct}%</strong></span>
+      </div>
+      ${locBars}
+    </div>
+  </div>
+
+  ${metaSection}
+
+</div>`;
 
     // ─── ELEVENLABS TTS ───────────────────────────────────────────────────────
     console.log("Calling ElevenLabs...");
