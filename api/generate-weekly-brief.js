@@ -1,9 +1,8 @@
 // api/generate-weekly-brief.js
+// V1.6: Updated weekly market context for Italian import retailers (EOFY + Mediterranean freight + AUD/EUR).
+//       Updated system prompt macro context instruction to reference weekly context block.
 // V1.5: Added Meta Ads insights (weekly spend, impressions, clicks + MTD spend).
-// V1.4: Removed PCW (prior corresponding week LY) from audio and data block.
-//       Removed Options section from audio and HTML display.
-//       Added ABS macro context (April 2026 household spending) to audio and HTML.
-//       Cash balance now states number only with "at last reconciled date" — no evaluation.
+// V1.4: Removed PCW. Removed Options section. Added ABS macro context. Cash balance number only.
 // Pulls Shopify + Xero (cash + P&L total revenue) + Meta Ads → Claude → ElevenLabs → Bubble → Twilio SMS.
 // ALL figures ex-GST.
 
@@ -60,19 +59,27 @@ function cleanBubbleUrl(raw) {
   return stripped.startsWith("//") ? `https:${stripped}` : stripped;
 }
 
-// ─── ABS MACRO CONTEXT (updated monthly) ─────────────────────────────────────
-// Source: ABS Monthly Household Spending Indicator, April 2026 (released 28 May 2026)
+// ─── WEEKLY MARKET CONTEXT (update each Monday) ───────────────────────────────
+// V1.6: EOFY + Mediterranean freight context for Italian import retailers
+// Next update due: week of 15 June 2026
 const ABS_MACRO_CONTEXT = `
-ABS MACRO CONTEXT (April 2026, latest available):
-- Total household spending fell 1.1% in April 2026 (seasonally adjusted), following a 1.6% rise in March.
-- Annual spending still up 4.9% vs April 2025, but slowing from 6.2% annual rise in March.
-- Categories relevant to retail/homewares/ceramics:
-  - Clothing and footwear: -2.2% in April (consumers pulling back on discretionary apparel)
-  - Furnishings and household equipment: -0.1% in April (essentially flat)
-  - Hotels, cafes and restaurants: +0.5% (slight positive for hospitality)
-- Main driver of the fall was transport (-4.7%), particularly air travel, due to Middle East conflict impacts on fuel and airfares.
-- Food spending fell 1.3%, with continued shift to generic/cheaper products in supermarkets.
-- Context: The broader pullback in discretionary spending in April reflects household budget pressure from elevated fuel costs, despite the Federal Government halving fuel excise from 1 April.
+WEEKLY MARKET CONTEXT (week of 8 June 2026):
+
+EOFY CONSUMER BEHAVIOUR:
+- Two weeks out from 30 June. Discretionary spending on considered purchases — homewares, ceramics, gifting — typically softens in the final two weeks of the financial year as households focus on bills, tax returns, and super contributions.
+- Opportunity: EOFY is also a clearance window. Consumers respond well to end-of-year promotions on considered items. Moving older inventory before new season stock arrives is worth considering.
+- ABS April 2026 context: Furnishings and household equipment was essentially flat (-0.1%) in April. Annual spending still up 4.9% year on year despite the monthly dip.
+
+MEDITERRANEAN FREIGHT & SUPPLY CHAIN (relevant to Italian importers):
+- Red Sea disruptions continue to push Mediterranean cargo via Cape of Good Hope. Transit times to Australia from southern Italy are running 2-3 weeks longer than pre-2024 norms.
+- Freight rates on Mediterranean-Australia routes remain elevated vs 2023 base. Next container quote from Italian suppliers is likely to reflect this — landed cost per piece warrants close attention.
+- Hormuz situation has stabilised near-term but remains a watch item for energy and freight cost volatility through Q3 2026.
+
+AUD/EUR:
+- AUD has been soft against EUR over the past 12 months. Italian suppliers invoicing in EUR means landed cost in AUD is materially higher than 18 months ago. Worth factoring into margin review on next order.
+
+ITALIAN PRODUCTION SEASONALITY:
+- Southern Italian ceramic workshops typically slow through July-August (local summer). Retailers dependent on this supply chain should confirm next order timing now to avoid a stock gap in October-November.
 `;
 
 // ─── XERO HELPERS ─────────────────────────────────────────────────────────────
@@ -342,13 +349,11 @@ export default async function handler(req, res) {
     const weekEnd   = shiftDays(today, -daysBackToSunday);
     const weekStart = shiftDays(weekEnd, -6);
 
-    // MTD anchored to weekEnd month — not today — so Monday runs don't flip to new month
     const mtdStart   = { year: weekEnd.year, month: weekEnd.month, day: 1 };
     const mtdEnd     = weekEnd;
     const lyMtdStart = shiftYear(mtdStart, -1);
     const lyMtdEnd   = shiftYear(mtdEnd, -1);
 
-    // YTD anchored to weekEnd year
     const ytdStart   = { year: weekEnd.year, month: 0, day: 1 };
     const ytdEnd     = weekEnd;
     const lyYtdStart = shiftYear(ytdStart, -1);
@@ -626,7 +631,7 @@ ALL FIGURES ARE EX-GST. You can mention "ex-GST" once near the start, but don't 
 The brief should take about 90 to 120 seconds to read aloud.
 
 STRUCTURE — follow this order exactly:
-1. Open with "Good morning [owner first name]." then immediately give 1-2 sentences of ABS macro context relevant to the store's category — frame it as a consultant setting the scene before the meeting. Not alarming, not dismissive. End with a bridging sentence like "Against that backdrop, here's how [store name] traded this week."
+1. Open with "Good morning [owner first name]." then immediately give 1-2 sentences of weekly market context from the WEEKLY MARKET CONTEXT block — pick the most relevant angle for this specific store (Italian importer, homewares/ceramics category, EOFY timing). Frame it as a consultant setting the scene — specific, useful, not alarming. End with a bridging sentence like "Against that backdrop, here's how [store name] traded this week."
 2. Total sales for the week (online plus other combined, ex-GST), split into online and other.
 3. MTD total sales split into online and other, with last year MTD comparison and brief commentary on the trend.
 4. Reconciled bank balance — state the number and note it is at last reconciled date. No evaluative commentary whatsoever.
@@ -634,7 +639,7 @@ STRUCTURE — follow this order exactly:
 6. Customer mix MTD vs last year MTD.
 7. Top products this week.
 8. Meta ads — see META ADS instruction below.
-9. Close with one ABS category-specific context sentence, then sign-off.
+9. Close with one specific, actionable observation drawn from the weekly market context — something the owner can actually do or watch this week. Then sign-off.
 
 CASH BALANCE INSTRUCTION: Simply state the bank balance figure and that it is at last reconciled date. Do not add any evaluative commentary — no "that's healthy", no "needs attention", no qualitative judgement of any kind.
 
@@ -650,7 +655,7 @@ Do NOT include any "Options to explore" section. End directly with this sign-off
 
 ${dataBlock}
 
-Write the Teloskope weekly audio brief. Follow the structure order exactly. Express all dollar amounts over one thousand in K format. Under one thousand, full words, no cents. No symbols, no dollar signs, no percent signs. Start with "Good morning ${firstName}." followed immediately by the ABS macro context. End with the Teloskope sign-off. Do not include Options.`;
+Write the Teloskope weekly audio brief. Follow the structure order exactly. Express all dollar amounts over one thousand in K format. Under one thousand, full words, no cents. No symbols, no dollar signs, no percent signs. Start with "Good morning ${firstName}." followed immediately by the most relevant weekly market context for this store. End with a specific actionable observation from the context block, then the Teloskope sign-off. Do not include Options.`;
 
     console.log("Calling Claude...");
     const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
@@ -670,7 +675,7 @@ Write the Teloskope weekly audio brief. Follow the structure order exactly. Expr
     const metaMtdCpm  = metaMtd  && metaMtd.impressions  > 0 ? ((metaMtd.spend  / metaMtd.impressions)  * 1000) : null;
     const metaMtdCpc  = metaMtd  && metaMtd.clicks  > 0 ? (metaMtd.spend  / metaMtd.clicks)  : null;
 
-    const hasMetaData = true; // Always show Meta section — zero spend is informative
+    const hasMetaData = true;
 
     // ─── STATE ABBREVIATION MAP ───────────────────────────────────────────────
     const stateAbbr = (name) => {
@@ -787,10 +792,9 @@ Write the Teloskope weekly audio brief. Follow the structure order exactly. Expr
 <div class="tlsk-page">
 
   <div class="tlsk-section">
-    <p class="tlsk-label">Market context — ABS April 2026</p>
+    <p class="tlsk-label">Market context — week of 8 June 2026</p>
     <div style="background:#fff;border:0.5px solid #D3D1C7;border-left:3px solid #B5D4F4;border-radius:0 12px 12px 0;padding:12px 14px">
-      <p style="font-size:13px;color:#5F5E5A;line-height:1.6;margin-bottom:6px">Household spending fell 1.1% in April. Clothing &amp; footwear down 2.2%, furnishings essentially flat. Annual spending still up 4.9% year on year.</p>
-      <a href="https://www.abs.gov.au/media-centre/media-releases/transport-costs-drives-fall-household-spending" target="_blank" style="font-size:12px;color:#185FA5;text-decoration:none">ABS source ↗</a>
+      <p style="font-size:13px;color:#5F5E5A;line-height:1.6;margin-bottom:6px">Two weeks to EOFY — discretionary spending softens as households focus on tax. Mediterranean freight via Cape of Good Hope adding 2–3 weeks transit. AUD soft vs EUR — watch landed cost on next Italian order.</p>
     </div>
   </div>
 
@@ -993,8 +997,6 @@ Write the Teloskope weekly audio brief. Follow the structure order exactly. Expr
       brief_text: briefText,
       audio_url: audioUrl,
       week_end_date: wE.toISOString(),
-
-      // Shopify (online-only) figures — ex-GST
       total_week_revenue:      Math.round(weekRev * 100) / 100,
       total_mtd_revenue:       Math.round(mtdRev * 100) / 100,
       total_ly_mtd_revenue:    Math.round(lyMtdRev * 100) / 100,
@@ -1007,8 +1009,6 @@ Write the Teloskope weekly audio brief. Follow the structure order exactly. Expr
       returning_customers_mtd: retMtd,
       top_products_json:       JSON.stringify(topProducts),
       xero_cash_balance:       xeroCashBalance !== null ? Math.round(xeroCashBalance * 100) / 100 : null,
-
-      // Xero P&L total sales split
       xero_week_total_revenue: xeroWeekTotalRevenue !== null ? Math.round(xeroWeekTotalRevenue * 100) / 100 : null,
       xero_mtd_total_revenue:  xeroMtdTotalRevenue  !== null ? Math.round(xeroMtdTotalRevenue  * 100) / 100 : null,
       other_sales_week:        weekOtherSales !== null ? Math.round(weekOtherSales * 100) / 100 : null,
