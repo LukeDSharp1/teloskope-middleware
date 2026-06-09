@@ -1,6 +1,8 @@
 // api/generate-weekly-brief.js
+// V1.7: Replaced BalanceSheet cash fetch with BankSummary StatementBalance — live bank balance
+//       across all accounts, netted. Removes "at last reconciled date" caveat entirely.
+//       Bank feed syncs daily so balance is current as of this morning.
 // V1.6: Updated weekly market context for Italian import retailers (EOFY + Mediterranean freight + AUD/EUR).
-//       Updated system prompt macro context instruction to reference weekly context block.
 // V1.5: Added Meta Ads insights (weekly spend, impressions, clicks + MTD spend).
 // V1.4: Removed PCW. Removed Options section. Added ABS macro context. Cash balance number only.
 // Pulls Shopify + Xero (cash + P&L total revenue) + Meta Ads → Claude → ElevenLabs → Bubble → Twilio SMS.
@@ -142,10 +144,12 @@ async function refreshXeroToken(xeroRefreshToken, xeroConnectionId) {
 }
 
 async function fetchXeroCashBalance(xeroAccessToken, xeroTenantId, xeroRefreshToken, xeroConnectionId) {
-  const today = new Date().toISOString().split("T")[0];
-  console.log("Fetching Xero BalanceSheet as at:", today);
+  // V1.7: Uses BankSummary report to get live StatementBalance (bank feed, daily sync)
+  // across ALL bank accounts, netted. No reconciliation lag.
+  console.log("Fetching Xero BankSummary (live statement balance)...");
+
   const doFetch = async (token) => {
-    return fetch(`https://api.xero.com/api.xro/2.0/Reports/BalanceSheet?date=${today}`, {
+    return fetch(`https://api.xero.com/api.xro/2.0/Reports/BankSummary`, {
       headers: {
         Authorization: `Bearer ${token}`,
         "Xero-tenant-id": xeroTenantId,
@@ -168,7 +172,7 @@ async function fetchXeroCashBalance(xeroAccessToken, xeroTenantId, xeroRefreshTo
     }
 
     if (!response.ok) {
-      console.error("Xero BalanceSheet error:", response.status, await response.text());
+      console.error("Xero BankSummary error:", response.status, await response.text());
       return null;
     }
 
@@ -176,34 +180,123 @@ async function fetchXeroCashBalance(xeroAccessToken, xeroTenantId, xeroRefreshTo
     const report = data?.Reports?.[0];
     if (!report) return null;
 
-    let totalBank = null;
-    let cashFallback = null;
+    // BankSummary returns a grid layout — find StatementBalance column index then sum all account rows
+    let statementBalanceColIndex = null;
+    let totalStatementBalance = 0;
+    let foundAny = false;
 
-    const searchRows = (rows) => {
-      for (const row of rows || []) {
-        if (row.RowType === "Row" || row.RowType === "SummaryRow") {
-          const label = (row.Cells?.[0]?.Value || "").toLowerCase();
-          const val = parseFloat((row.Cells?.[1]?.Value || "").replace(/,/g, ""));
-          if (!isNaN(val)) {
-            if (label.includes("total bank") && totalBank === null) {
-              console.log("Xero Total Bank found:", row.Cells?.[0]?.Value, "=", val);
-              totalBank = val;
-            } else if (label.includes("cash") && cashFallback === null) {
-              console.log("Xero cash fallback:", row.Cells?.[0]?.Value, "=", val);
-              cashFallback = val;
+    // Find header row to locate StatementBalance column
+    for (const row of report.Rows || []) {
+      if (row.RowType === "Header") {
+        const cells = row.Cells || [];
+        for (let i = 0; i < cells.length; i++) {
+          if ((cells[i]?.Value || "").toLowerCase().includes("statement balance")) {
+            statementBalanceColIndex = i;
+            break;
+          }
+        }
+      }
+      // Sum StatementBalance across all account rows
+      if (row.RowType === "Row" && statementBalanceColIndex !== null) {
+        const cells = row.Cells || [];
+        const val = parseFloat((cells[statementBalanceColIndex]?.Value || "").replace(/,/g, ""));
+        if (!isNaN(val)) {
+          totalStatementBalance += val;
+          foundAny = true;
+          console.log("BankSummary account row — StatementBalance:", val);
+        }
+      }
+      // Also check nested rows (some Xero tenants wrap in sections)
+      if (row.Rows) {
+        for (const subRow of row.Rows) {
+          if (subRow.RowType === "Row" && statementBalanceColIndex !== null) {
+            const cells = subRow.Cells || [];
+            const val = parseFloat((cells[statementBalanceColIndex]?.Value || "").replace(/,/g, ""));
+            if (!isNaN(val)) {
+              totalStatementBalance += val;
+              foundAny = true;
+              console.log("BankSummary sub-account row — StatementBalance:", val);
             }
           }
         }
-        if (row.Rows) searchRows(row.Rows);
       }
-    };
+    }
 
-    searchRows(report.Rows);
-    const result = totalBank !== null ? totalBank : cashFallback;
-    console.log("Xero reconciled bank position:", result);
-    return result;
+    if (!foundAny) {
+      console.warn("BankSummary: no StatementBalance rows found, returning null");
+      return null;
+    }
+
+    console.log("Xero live statement balance (all accounts netted):", totalStatementBalance);
+    return totalStatementBalance;
   } catch (err) {
-    console.error("Xero fetch error:", err.message);
+    console.error("Xero BankSummary fetch error:", err.message);
+    return null;
+  }
+}
+
+async function fetchXeroGoogleSpend(fromDate, toDate, xeroAccessToken, xeroTenantId, xeroRefreshToken, xeroConnectionId) {
+  // Pulls bank feed transactions and pattern-matches on "Google" to extract ad spend
+  // No Google OAuth required — reads directly from Xero bank feed
+  const fromIso = fromDate.toISOString().split("T")[0];
+  const toIso = toDate.toISOString().split("T")[0];
+  console.log(`Fetching Xero bank transactions for Google spend ${fromIso} → ${toIso}...`);
+
+  const doFetch = async (token) => {
+    return fetch(`https://api.xero.com/api.xro/2.0/BankTransactions?fromDate=${fromIso}&toDate=${toIso}&Status=AUTHORISED`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Xero-tenant-id": xeroTenantId,
+        Accept: "application/json",
+      },
+    });
+  };
+
+  try {
+    let response = await doFetch(xeroAccessToken);
+
+    if (response.status === 401 && xeroRefreshToken && xeroConnectionId) {
+      const newToken = await refreshXeroToken(xeroRefreshToken, xeroConnectionId);
+      if (newToken) {
+        response = await doFetch(newToken);
+      } else {
+        return null;
+      }
+    }
+
+    if (!response.ok) {
+      console.error("Xero BankTransactions error:", response.status, await response.text());
+      return null;
+    }
+
+    const data = await response.json();
+    const transactions = data?.BankTransactions || [];
+
+    let googleSpend = 0;
+    for (const tx of transactions) {
+      const desc = (tx.Reference || tx.Particulars || "").toLowerCase();
+      const contact = (tx.Contact?.Name || "").toLowerCase();
+      const lineDesc = (tx.LineItems?.[0]?.Description || "").toLowerCase();
+      if (
+        desc.includes("google") ||
+        contact.includes("google") ||
+        lineDesc.includes("google ads") ||
+        lineDesc.includes("google adwords")
+      ) {
+        // SPEND transactions are RECEIVE type with negative subtotal, or SPEND type
+        // Use absolute value — we want the spend amount
+        const amount = Math.abs(parseFloat(tx.SubTotal || tx.Total || 0));
+        if (amount > 0) {
+          googleSpend += amount;
+          console.log(`Google transaction found: ${tx.Reference || contact} — $${amount}`);
+        }
+      }
+    }
+
+    console.log(`Google spend via bank feed (${fromIso}→${toIso}): $${googleSpend.toFixed(2)}`);
+    return googleSpend > 0 ? googleSpend : null;
+  } catch (err) {
+    console.error("Xero Google spend fetch error:", err.message);
     return null;
   }
 }
@@ -440,6 +533,8 @@ export default async function handler(req, res) {
       xeroMtdTotalRevenue,
       metaWeek,
       metaMtd,
+      googleWeekSpend,
+      googleMtdSpend,
     ] = await Promise.all([
       fetchAllOrders(wS, wE),
       fetchAllOrders(mS, mE, "total_price,created_at,customer"),
@@ -454,15 +549,19 @@ export default async function handler(req, res) {
       xeroAvailable ? fetchXeroTotalRevenue(mS, mE, xero_access_token, xero_tenant_id, xero_refresh_token, xero_connection_id) : Promise.resolve(null),
       fetchMetaInsights(meta_access_token, meta_ad_account_id, "last_7d"),
       fetchMetaInsights(meta_access_token, meta_ad_account_id, "last_30d"),
+      xeroAvailable ? fetchXeroGoogleSpend(wS, wE, xero_access_token, xero_tenant_id, xero_refresh_token, xero_connection_id) : Promise.resolve(null),
+      xeroAvailable ? fetchXeroGoogleSpend(mS, mE, xero_access_token, xero_tenant_id, xero_refresh_token, xero_connection_id) : Promise.resolve(null),
     ]);
 
     console.log("Week orders:", weekOrders.length, "| Revenue ex-GST:", sumRevenueExGst(weekOrders).toFixed(2));
     console.log("MTD orders:", mtdOrders.length, "| Revenue ex-GST:", sumRevenueExGst(mtdOrders).toFixed(2));
-    console.log("Xero reconciled bank position:", xeroCashBalance);
+    console.log("Xero live statement balance:", xeroCashBalance);
     console.log("Xero P&L week total (ex-GST):", xeroWeekTotalRevenue);
     console.log("Xero P&L MTD total (ex-GST):", xeroMtdTotalRevenue);
     console.log("Meta week insights:", metaWeek);
     console.log("Meta MTD insights:", metaMtd);
+    console.log("Google week spend (bank feed):", googleWeekSpend);
+    console.log("Google MTD spend (bank feed):", googleMtdSpend);
 
     // ─── NEW VS RETURNING CUSTOMER LOGIC ─────────────────────────────────────
     const preMtdCustomerIds = new Set(preMtdOrders.filter(o => o.customer?.id).map(o => String(o.customer.id)));
@@ -529,7 +628,7 @@ export default async function handler(req, res) {
     const monthLabel = fmtDate({ year: weekEnd.year, month: weekEnd.month, day: 1 }, { month: "long", year: "numeric" });
     const cashNum  = xeroCashBalance !== null && xeroCashBalance !== undefined ? fmt$(xeroCashBalance) : null;
     const cashNote = xeroCashBalance !== null && xeroCashBalance !== undefined
-      ? `${fmt$(xeroCashBalance)} at last reconciled date`
+      ? `${fmt$(xeroCashBalance)} (live bank balance via Xero feed)`
       : "not available";
 
     const firstName = (user_name || "").split(" ")[0] || user_name;
@@ -570,8 +669,8 @@ ${totalSalesBlock}
 ONLINE PERFORMANCE (Shopify, ex-GST):
 - Revenue this week: ${fmt$(weekRev)} | ${weekTx} orders | AOV ${fmt$(weekAov)}
 
-RECONCILED BANK POSITION (Xero):
-- Bank balance: ${cashNote}
+LIVE BANK BALANCE (Xero bank feed, all accounts netted):
+- Balance: ${cashNote}
 
 ONLINE MONTH TO DATE (${monthLabel}, Shopify, ex-GST):
 - Revenue: ${fmt$(mtdRev)} | ${mtdTx} orders
@@ -608,6 +707,11 @@ ${metaMtd
 - CPC: $${metaMtd.clicks > 0 ? (metaMtd.spend / metaMtd.clicks).toFixed(2) : "N/A"} (AU retail benchmark: $1.50–3.00)`
   : "- Not connected or no data"}
 
+GOOGLE ADS SPEND (via Xero bank feed — spend only, no click data):
+- Last 7 days: ${googleWeekSpend !== null ? `$${googleWeekSpend.toFixed(2)}` : "no Google transactions found"}
+- Month to date: ${googleMtdSpend !== null ? `$${googleMtdSpend.toFixed(2)}` : "no Google transactions found"}
+- Note: sourced from bank feed transaction descriptions. May vary slightly from Google Ads dashboard due to billing cycles.
+
 ${ABS_MACRO_CONTEXT}
 `;
 
@@ -634,20 +738,23 @@ STRUCTURE — follow this order exactly:
 1. Open with "Good morning [owner first name]." then immediately give 1-2 sentences of weekly market context from the WEEKLY MARKET CONTEXT block — pick the most relevant angle for this specific store (Italian importer, homewares/ceramics category, EOFY timing). Frame it as a consultant setting the scene — specific, useful, not alarming. End with a bridging sentence like "Against that backdrop, here's how [store name] traded this week."
 2. Total sales for the week (online plus other combined, ex-GST), split into online and other.
 3. MTD total sales split into online and other, with last year MTD comparison and brief commentary on the trend.
-4. Reconciled bank balance — state the number and note it is at last reconciled date. No evaluative commentary whatsoever.
+4. Live bank balance — state the number cleanly. It is a live bank feed balance, current as of this morning. No caveats needed.
 5. Online transactions and AOV this week.
 6. Customer mix MTD vs last year MTD.
 7. Top products this week.
 8. Meta ads — see META ADS instruction below.
-9. Close with one specific, actionable observation drawn from the weekly market context — something the owner can actually do or watch this week. Then sign-off.
+9. Google ads — see GOOGLE ADS instruction below.
+10. Close with one specific, actionable observation drawn from the weekly market context — something the owner can actually do or watch this week. Then sign-off.
 
-CASH BALANCE INSTRUCTION: Simply state the bank balance figure and that it is at last reconciled date. Do not add any evaluative commentary — no "that's healthy", no "needs attention", no qualitative judgement of any kind.
+CASH BALANCE INSTRUCTION: State the live bank balance confidently — it reflects the bank feed as of this morning. No qualifiers, no caveats, no evaluative commentary.
 
 The "Other" sales figure (in-store + wholesale) comes from Xero reconciled data minus Shopify. Treat as the most accurate available picture without over-claiming precision.
 
 When last year data is not available, acknowledge it briefly and move on.
 
 META ADS: If Meta data is available, report spend for the week and MTD. State the CPM and CPC figures and explicitly benchmark them against AU retail averages — e.g. "your cost per click this month was one dollar eleven, against an Australian retail benchmark of one dollar fifty to three dollars — well inside that range. Your cost per thousand impressions was twenty eight dollars, against a benchmark of fifteen to thirty five dollars — again solid." If no spend this week but MTD spend exists, note that briefly then give the MTD benchmark read. If zero spend across both periods, skip Meta entirely.
+
+GOOGLE ADS: If Google spend data is available from the bank feed, report it briefly — weekly and MTD spend in K format. Note it comes from the bank feed so may vary slightly from the Google Ads dashboard. No benchmarking — spend only. If no Google transactions found, skip this section entirely.
 
 Do NOT include any "Options to explore" section. End directly with this sign-off on a new line: "That's your Teloskope brief for the week. Have a great Monday, and I'll be back next week with your next update."`;
 
@@ -773,7 +880,27 @@ Write the Teloskope weekly audio brief. Follow the structure order exactly. Expr
       </div>`;
     })();
 
-    // ─── VISUAL BRIEF HTML ────────────────────────────────────────────────────
+    // ─── GOOGLE SPEND HTML (bank feed) ───────────────────────────────────────
+    const googleSection = (() => {
+      if (!googleWeekSpend && !googleMtdSpend) return "";
+      return `
+      <div style="margin-bottom:20px">
+        <p style="font-size:11px;font-weight:500;color:#888780;letter-spacing:.06em;text-transform:uppercase;margin-bottom:8px">Google ads — via bank feed</p>
+        <div style="background:#fff;border:0.5px solid #D3D1C7;border-radius:12px;padding:14px 16px">
+          <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-bottom:10px">
+            <div style="background:#F1EFE8;border-radius:8px;padding:12px">
+              <p style="font-size:12px;color:#888780;margin-bottom:4px">7 day spend</p>
+              <p style="font-size:20px;font-weight:500">${googleWeekSpend ? fmt$(googleWeekSpend) : "—"}</p>
+            </div>
+            <div style="background:#F1EFE8;border-radius:8px;padding:12px">
+              <p style="font-size:12px;color:#888780;margin-bottom:4px">Month to date</p>
+              <p style="font-size:20px;font-weight:500">${googleMtdSpend ? fmt$(googleMtdSpend) : "—"}</p>
+            </div>
+          </div>
+          <p style="font-size:11px;color:#888780;line-height:1.5">Sourced from Xero bank feed — no Google login required. May vary slightly from Google Ads dashboard due to billing cycles.</p>
+        </div>
+      </div>`;
+    })();
     const briefText = `
 <style>
 .tlsk-page{font-family:Inter,-apple-system,sans-serif;padding:0;max-width:420px;margin:0 auto}
@@ -868,9 +995,9 @@ Write the Teloskope weekly audio brief. Follow the structure order exactly. Expr
   </div>
 
   <div class="tlsk-section">
-    <p class="tlsk-label">Reconciled cash</p>
+    <p class="tlsk-label">Live bank balance</p>
     <div class="tlsk-card">
-      ${cashNum ? `<p class="tlsk-hero">${cashNum}</p><p class="tlsk-sub" style="margin-top:6px">At last reconciled date</p>` : `<p style="font-size:14px;color:#888780">Not available — Xero not connected</p>`}
+      ${cashNum ? `<p class="tlsk-hero">${cashNum}</p><p class="tlsk-sub" style="margin-top:6px">Via Xero bank feed — updated daily</p>` : `<p style="font-size:14px;color:#888780">Not available — Xero not connected</p>`}
     </div>
   </div>
 
@@ -936,6 +1063,8 @@ Write the Teloskope weekly audio brief. Follow the structure order exactly. Expr
   </div>
 
   ${metaSection}
+
+  ${googleSection}
 
 </div>`;
 
