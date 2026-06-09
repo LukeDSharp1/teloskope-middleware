@@ -62,26 +62,33 @@ function cleanBubbleUrl(raw) {
 }
 
 // ─── WEEKLY MARKET CONTEXT (update each Monday) ───────────────────────────────
-// V1.6: EOFY + Mediterranean freight context for Italian import retailers
+// V1.7: Universal macro indicators applicable to all retailers.
+// Category-specific context (supply chain, currency, seasonality) will be
+// personalised per user profile in a future build.
 // Next update due: week of 15 June 2026
 const ABS_MACRO_CONTEXT = `
-WEEKLY MARKET CONTEXT (week of 8 June 2026):
+WEEKLY MARKET CONTEXT (week ending 7 June 2026):
 
-EOFY CONSUMER BEHAVIOUR:
-- Two weeks out from 30 June. Discretionary spending on considered purchases — homewares, ceramics, gifting — typically softens in the final two weeks of the financial year as households focus on bills, tax returns, and super contributions.
-- Opportunity: EOFY is also a clearance window. Consumers respond well to end-of-year promotions on considered items. Moving older inventory before new season stock arrives is worth considering.
-- ABS April 2026 context: Furnishings and household equipment was essentially flat (-0.1%) in April. Annual spending still up 4.9% year on year despite the monthly dip.
+CONSUMER SPENDING:
+- ABS April 2026: Total household spending fell 1.1% in April after a 1.6% rise in March. Annual spending still up 4.9% vs April 2025 but momentum is slowing.
+- Discretionary categories softening — clothing/footwear down 2.2%, furnishings flat. Food down 1.3% with continued shift to generics.
+- Hotels, cafes and restaurants up 0.5% — slight positive for experiential spend.
 
-MEDITERRANEAN FREIGHT & SUPPLY CHAIN (relevant to Italian importers):
-- Red Sea disruptions continue to push Mediterranean cargo via Cape of Good Hope. Transit times to Australia from southern Italy are running 2-3 weeks longer than pre-2024 norms.
-- Freight rates on Mediterranean-Australia routes remain elevated vs 2023 base. Next container quote from Italian suppliers is likely to reflect this — landed cost per piece warrants close attention.
-- Hormuz situation has stabilised near-term but remains a watch item for energy and freight cost volatility through Q3 2026.
+EOFY (all retailers):
+- Two weeks to 30 June. Consumer discretionary spending typically softens in the final two weeks of the financial year as households focus on bills, tax returns, and super contributions.
+- EOFY is also a clearance opportunity — consumers respond to end-of-year promotions. Moving older inventory before new season stock is worth considering for any retailer.
 
-AUD/EUR:
-- AUD has been soft against EUR over the past 12 months. Italian suppliers invoicing in EUR means landed cost in AUD is materially higher than 18 months ago. Worth factoring into margin review on next order.
+INTEREST RATES & HOUSEHOLD PRESSURE:
+- RBA cash rate at current level continues to pressure household budgets. Mortgage holders and renters are the most constrained segment of the consumer base.
+- Consumers are trading down across categories — private label, value options, and considered purchases over impulse buys. Retailers with clear value proposition or strong brand loyalty are better insulated.
 
-ITALIAN PRODUCTION SEASONALITY:
-- Southern Italian ceramic workshops typically slow through July-August (local summer). Retailers dependent on this supply chain should confirm next order timing now to avoid a stock gap in October-November.
+LABOUR MARKET:
+- Employment remains relatively tight. Wage growth is supporting spending at the aggregate level even as individual household budgets are squeezed by cost of living.
+- For retailers with staff: labour cost pressure continues. Award wage increases effective 1 July 2026 — worth factoring into cost base planning now.
+
+FUEL & FREIGHT:
+- Domestic freight costs stabilised in recent months. Federal Government halved fuel excise from 1 April — modest positive for delivery cost base.
+- International freight remains elevated on major routes vs 2023 base. Retailers importing from Europe or Asia should watch landed cost carefully on next orders.
 `;
 
 // ─── XERO HELPERS ─────────────────────────────────────────────────────────────
@@ -755,7 +762,7 @@ ALL FIGURES ARE EX-GST. You can mention "ex-GST" once near the start, but don't 
 The brief should take about 90 to 120 seconds to read aloud.
 
 STRUCTURE — follow this order exactly:
-1. Open with "Good morning [owner first name]." then immediately give 1-2 sentences of weekly market context from the WEEKLY MARKET CONTEXT block — pick the most relevant angle for this specific store (Italian importer, homewares/ceramics category, EOFY timing). Frame it as a consultant setting the scene — specific, useful, not alarming. End with a bridging sentence like "Against that backdrop, here's how [store name] traded this week."
+1. Open with "Good morning [owner first name]." then immediately give 1-2 sentences of weekly market context from the WEEKLY MARKET CONTEXT block — pick the most relevant angle for this specific store's category and size. Frame it as a consultant setting the scene — specific, useful, not alarming. End with a bridging sentence like "Against that backdrop, here's how [store name] traded this week."
 2. Total sales for the week (online plus other combined, ex-GST), split into online and other.
 3. MTD total sales split into online and other, with last year MTD comparison and brief commentary on the trend.
 4. Live bank balance — state the number cleanly. It is a live bank feed balance, current as of this morning. No caveats needed.
@@ -939,9 +946,9 @@ Write the Teloskope weekly audio brief. Follow the structure order exactly. Expr
 <div class="tlsk-page">
 
   <div class="tlsk-section">
-    <p class="tlsk-label">Market context — week of 8 June 2026</p>
+    <p class="tlsk-label">Market context — week ending ${fmtDate(weekEnd, { day: "numeric", month: "long", year: "numeric" })}</p>
     <div style="background:#fff;border:0.5px solid #D3D1C7;border-left:3px solid #B5D4F4;border-radius:0 12px 12px 0;padding:12px 14px">
-      <p style="font-size:13px;color:#5F5E5A;line-height:1.6;margin-bottom:6px">Two weeks to EOFY — discretionary spending softens as households focus on tax. Mediterranean freight via Cape of Good Hope adding 2–3 weeks transit. AUD soft vs EUR — watch landed cost on next Italian order.</p>
+      <p style="font-size:13px;color:#5F5E5A;line-height:1.6;margin-bottom:6px">Two weeks to EOFY — discretionary spending softens as households focus on tax and bills. RBA rate pressure continues to squeeze budgets. Retailers with clear value proposition or strong loyalty are better insulated. Award wage increases take effect 1 July — worth factoring into cost base now.</p>
     </div>
   </div>
 
