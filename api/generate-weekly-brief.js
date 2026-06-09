@@ -190,12 +190,24 @@ async function fetchXeroCashBalance(xeroAccessToken, xeroTenantId, xeroRefreshTo
       if (row.RowType === "Header") {
         const cells = row.Cells || [];
         console.log("BankSummary header cells:", cells.map(c => c?.Value));
+        // Prefer "closing balance" — search for "closing" first, then fall back to "statement"
         for (let i = 0; i < cells.length; i++) {
           const cellVal = (cells[i]?.Value || "").toLowerCase();
-          if (cellVal.includes("statement") || cellVal.includes("balance") || cellVal.includes("closing")) {
+          if (cellVal.includes("closing")) {
             statementBalanceColIndex = i;
-            console.log("BankSummary: matched column", i, "→", cells[i]?.Value);
+            console.log("BankSummary: matched closing balance column", i, "→", cells[i]?.Value);
             break;
+          }
+        }
+        // Fallback: any column with "statement" or "balance" if no closing found
+        if (statementBalanceColIndex === null) {
+          for (let i = 0; i < cells.length; i++) {
+            const cellVal = (cells[i]?.Value || "").toLowerCase();
+            if (cellVal.includes("statement") || cellVal.includes("balance")) {
+              statementBalanceColIndex = i;
+              console.log("BankSummary: fallback matched column", i, "→", cells[i]?.Value);
+              break;
+            }
           }
         }
       }
