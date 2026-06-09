@@ -189,9 +189,12 @@ async function fetchXeroCashBalance(xeroAccessToken, xeroTenantId, xeroRefreshTo
     for (const row of report.Rows || []) {
       if (row.RowType === "Header") {
         const cells = row.Cells || [];
+        console.log("BankSummary header cells:", cells.map(c => c?.Value));
         for (let i = 0; i < cells.length; i++) {
-          if ((cells[i]?.Value || "").toLowerCase().includes("statement balance")) {
+          const cellVal = (cells[i]?.Value || "").toLowerCase();
+          if (cellVal.includes("statement") || cellVal.includes("balance") || cellVal.includes("closing")) {
             statementBalanceColIndex = i;
+            console.log("BankSummary: matched column", i, "→", cells[i]?.Value);
             break;
           }
         }
@@ -442,10 +445,15 @@ export default async function handler(req, res) {
     const weekEnd   = shiftDays(today, -daysBackToSunday);
     const weekStart = shiftDays(weekEnd, -6);
 
-    const mtdStart   = { year: weekEnd.year, month: weekEnd.month, day: 1 };
+    // MTD anchors to current month (today's month in shop timezone), not weekEnd month
+    // This handles weeks that span month boundaries correctly
+    const mtdStart   = { year: today.year, month: today.month, day: 1 };
     const mtdEnd     = weekEnd;
     const lyMtdStart = shiftYear(mtdStart, -1);
     const lyMtdEnd   = shiftYear(mtdEnd, -1);
+
+    console.log("MTD start (current month day 1):", mtdStart, "→ end:", mtdEnd);
+    console.log("Week start:", weekStart, "→ week end:", weekEnd);
 
     const ytdStart   = { year: weekEnd.year, month: 0, day: 1 };
     const ytdEnd     = weekEnd;
