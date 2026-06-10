@@ -618,6 +618,29 @@ If there is no strong signal worth persisting, return: {"persist_insight": null}
       try {
         const raw = summariserResponse.content[0].text.trim();
         const parsed = JSON.parse(raw);
+
+        // Write insight to Bubble if one exists
+        if (parsed.persist_insight && user_id) {
+          console.log("Options: writing insight to Bubble...");
+          const bubbleRes = await fetch(`${BUBBLE_BASE_URL}/wf/ingest_options_insight`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              user_id,
+              insight_text: parsed.persist_insight.insight_text,
+              category: parsed.persist_insight.category,
+              confidence: parsed.persist_insight.confidence,
+            }),
+          });
+          if (bubbleRes.ok) {
+            console.log("Options: insight saved to Bubble successfully");
+          } else {
+            console.error("Options: Bubble insight save failed:", await bubbleRes.text());
+          }
+        } else {
+          console.log("Options: no insight to persist this session");
+        }
+
         return res.status(200).json({ success: true, ...parsed });
       } catch {
         return res.status(200).json({ success: true, persist_insight: null });
