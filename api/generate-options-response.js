@@ -598,6 +598,8 @@ export default async function handler(req, res) {
     const sessionOpenBool = session_open === true || session_open === "true";
     const sessionEndBool = session_end === true || session_end === "true";
 
+    const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
+
     // ─── SESSION END: INSIGHT SUMMARISER ─────────────────────────────────────
     if (sessionEndBool) {
       console.log("Options: session end — running insight summariser...");
