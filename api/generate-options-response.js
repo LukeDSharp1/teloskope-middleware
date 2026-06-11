@@ -318,7 +318,16 @@ async function fetchBusinessData(params) {
 }
 
 // ─── BUILD DATA CONTEXT STRING FOR CLAUDE ─────────────────────────────────────
-function buildDataContext(data, storeName, firstName) {
+function buildDataContext(data, storeName, firstName, profile = {}) {
+  const {
+    business_description = "",
+    business_type = "",
+    supply_chain = "",
+    invoice_currency = "",
+    business_stage = "",
+    owner_challenge = "",
+  } = profile;
+
   const {
     today, cashBalance,
     mtdRevOnline, lyMtdRevOnline, xeroMtdRevenue,
@@ -708,7 +717,14 @@ If there is no strong signal worth persisting, return: {"persist_insight": null}
       meta_access_token, meta_ad_account_id,
     });
 
-    const dataContext = buildDataContext(businessData, store_name, firstName);
+    const dataContext = buildDataContext(businessData, store_name, firstName, {
+      business_description,
+      business_type,
+      supply_chain,
+      invoice_currency,
+      business_stage,
+      owner_challenge,
+    });
 
     // ─── BUILD PRIOR INSIGHTS BLOCK ───────────────────────────────────────────
     const insightsBlock = priorInsightsParsed.length > 0
