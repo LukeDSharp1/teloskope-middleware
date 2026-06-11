@@ -599,6 +599,8 @@ export default async function handler(req, res) {
     const sessionOpenBool = session_open === true || session_open === "true";
     const sessionEndBool = session_end === true || session_end === "true";
 
+    console.log("Options debug — session_open:", session_open, "| session_end:", session_end, "| conversation_log length:", (conversation_log || "").length, "| user_message:", user_message ? "present" : "empty");
+
     const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
     // ─── SESSION END: INSIGHT SUMMARISER ─────────────────────────────────────
