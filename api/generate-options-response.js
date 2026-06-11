@@ -337,6 +337,14 @@ OWNER: ${firstName}
 DATA AS AT: ${fmtDate(today)}
 ALL FIGURES EX-GST.
 
+BUSINESS PROFILE:
+- Description: ${business_description || "not provided"}
+- Type: ${business_type || "not provided"}
+- Supply chain: ${supply_chain || "not provided"}
+- Invoice currency: ${invoice_currency || "AUD"}
+- Business stage: ${business_stage || "not provided"}
+- Owner's biggest challenge: ${owner_challenge || "not provided"}
+
 LIVE BANK BALANCE (Xero bank feed):
 ${cashBalance !== null ? fmt$(cashBalance) : "Not available — Xero not connected"}
 
@@ -585,6 +593,13 @@ export default async function handler(req, res) {
     user_id,
     user_name,
     store_name,
+    // Business profile
+    business_description = "",
+    business_type = "",
+    supply_chain = "",
+    invoice_currency = "",
+    business_stage = "",
+    owner_challenge = "",
     // Conversation
     messages = [],             // Legacy — kept for backwards compat
     conversation_log = "",     // Plain text conversation history — easier to build in Bubble
