@@ -702,21 +702,26 @@ If there is no strong signal worth persisting, return: {"persist_insight": null}
         { role: "user", content: "Please open the session." }
       ];
     } else {
-      // Continuing session — strip HTML tags from conversation_html to get plain text history
+      // Continuing session — strip HTML tags from conversation_log to get plain text history
       const plainHistory = (conversation_log || "")
         .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
         .replace(/<[^>]+>/g, " ")
         .replace(/\s+/g, " ")
         .trim();
 
+      // Build as proper alternating turns
       conversationMessages = [
         contextMessage,
         contextAck,
         {
           role: "user",
           content: plainHistory
-            ? `Here is the conversation so far in this session:\n\n${plainHistory}\n\nContinue the conversation. Do not re-introduce yourself.`
-            : "Please open the session."
+            ? `This is a continuing session. Here is what has been discussed so far:\n\n${plainHistory}\n\nDo not re-introduce yourself. Continue directly from where the conversation left off.`
+            : `This is a continuing session. The user has a new message.`
+        },
+        {
+          role: "assistant",
+          content: "Understood, continuing the conversation."
         },
         ...(user_message ? [{ role: "user", content: user_message }] : [])
       ];
