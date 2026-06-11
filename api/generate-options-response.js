@@ -568,12 +568,13 @@ export default async function handler(req, res) {
     user_name,
     store_name,
     // Conversation
-    messages = [],          // Full message history array [{role, content}]
-    user_message,           // Current user message (null on session open)
-    prior_insights = [],    // Persisted insights from Bubble user_insights records
+    messages = [],             // Legacy — kept for backwards compat
+    conversation_log = "",     // Plain text conversation history — easier to build in Bubble
+    user_message,              // Current user message (null on session open)
+    prior_insights = [],       // Persisted insights from Bubble user_insights records
     // Control
-    session_open = false,   // True on first load — triggers data fetch + opening message
-    session_end = false,    // True when user ends session — triggers insight summariser
+    session_open = false,      // True on first load — triggers data fetch + opening message
+    session_end = false,       // True when user ends session — triggers insight summariser
   } = req.body;
 
   if (!shopify_shop_domain || !shopify_access_token || !user_id || !bubble_secret_key) {
@@ -693,7 +694,7 @@ If there is no strong signal worth persisting, return: {"persist_insight": null}
 
     let conversationMessages;
 
-    if (sessionOpenBool || messagesParsed.length === 0) {
+    if (sessionOpenBool || (!conversation_log && messagesParsed.length === 0)) {
       // Fresh session — inject context then ask Claude to open
       conversationMessages = [
         contextMessage,
@@ -701,11 +702,15 @@ If there is no strong signal worth persisting, return: {"persist_insight": null}
         { role: "user", content: "Please open the session." }
       ];
     } else {
-      // Continuing session — inject context + full history + new user message
+      // Continuing session — inject context + conversation history + new user message
+      const historyMessages = conversation_log
+        ? [{ role: "user", content: `Previous conversation in this session:\n${conversation_log}\n\nNow continue the conversation.` }]
+        : messagesParsed;
+
       conversationMessages = [
         contextMessage,
         contextAck,
-        ...messagesParsed,
+        ...historyMessages,
         ...(user_message ? [{ role: "user", content: user_message }] : [])
       ];
     }
