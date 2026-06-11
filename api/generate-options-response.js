@@ -702,15 +702,22 @@ If there is no strong signal worth persisting, return: {"persist_insight": null}
         { role: "user", content: "Please open the session." }
       ];
     } else {
-      // Continuing session — inject context + conversation history + new user message
-      const historyMessages = conversation_log
-        ? [{ role: "user", content: `Previous conversation in this session:\n${conversation_log}\n\nNow continue the conversation.` }]
-        : messagesParsed;
+      // Continuing session — strip HTML tags from conversation_html to get plain text history
+      const plainHistory = (conversation_log || "")
+        .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+        .replace(/<[^>]+>/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
 
       conversationMessages = [
         contextMessage,
         contextAck,
-        ...historyMessages,
+        {
+          role: "user",
+          content: plainHistory
+            ? `Here is the conversation so far in this session:\n\n${plainHistory}\n\nContinue the conversation. Do not re-introduce yourself.`
+            : "Please open the session."
+        },
         ...(user_message ? [{ role: "user", content: user_message }] : [])
       ];
     }
