@@ -554,6 +554,7 @@ export default async function handler(req, res) {
   }
 
   const {
+    bubble_secret_key,
     // Auth & identity
     shopify_shop_domain,
     shopify_access_token,
@@ -575,11 +576,12 @@ export default async function handler(req, res) {
     session_end = false,    // True when user ends session — triggers insight summariser
   } = req.body;
 
-  if (!shopify_shop_domain || !shopify_access_token || !user_id) {
+  if (!shopify_shop_domain || !shopify_access_token || !user_id || !bubble_secret_key) {
     console.log("400 — missing fields. Received:", JSON.stringify({
       shopify_shop_domain: shopify_shop_domain || "MISSING",
       shopify_access_token: shopify_access_token ? "present" : "MISSING",
       user_id: user_id || "MISSING",
+      bubble_secret_key: bubble_secret_key ? "present" : "MISSING",
       session_open,
       session_end,
       messages_length: Array.isArray(messages) ? messages.length : typeof messages,
@@ -590,13 +592,17 @@ export default async function handler(req, res) {
   const firstName = (user_name || "").split(" ")[0] || user_name;
 
   try {
-    const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
+    // Bubble sends arrays as strings — parse if needed
+    const messagesParsed = typeof messages === "string" ? JSON.parse(messages || "[]") : (messages || []);
+    const priorInsightsParsed = typeof prior_insights === "string" ? JSON.parse(prior_insights || "[]") : (prior_insights || []);
+    const sessionOpenBool = session_open === true || session_open === "true";
+    const sessionEndBool = session_end === true || session_end === "true";
 
     // ─── SESSION END: INSIGHT SUMMARISER ─────────────────────────────────────
-    if (session_end) {
+    if (sessionEndBool) {
       console.log("Options: session end — running insight summariser...");
 
-      const conversationText = messages
+      const conversationText = messagesParsed
         .map(m => `${m.role === "user" ? "Owner" : "Teloskope"}: ${m.content}`)
         .join("\n\n");
 
@@ -634,6 +640,7 @@ If there is no strong signal worth persisting, return: {"persist_insight": null}
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
+              secret_key: bubble_secret_key,
               user_id,
               insight_text: parsed.persist_insight.insight_text,
               category: parsed.persist_insight.category,
@@ -666,8 +673,8 @@ If there is no strong signal worth persisting, return: {"persist_insight": null}
     const dataContext = buildDataContext(businessData, store_name, firstName);
 
     // ─── BUILD PRIOR INSIGHTS BLOCK ───────────────────────────────────────────
-    const insightsBlock = prior_insights.length > 0
-      ? `\nPRIOR OBSERVATIONS (from previous sessions):\n${prior_insights.map(i => `- [${i.category}] ${i.insight_text}`).join("\n")}`
+    const insightsBlock = priorInsightsParsed.length > 0
+      ? `\nPRIOR OBSERVATIONS (from previous sessions):\n${priorInsightsParsed.map(i => `- [${i.category}] ${i.insight_text}`).join("\n")}`
       : "";
 
     // ─── BUILD MESSAGE ARRAY ──────────────────────────────────────────────────
@@ -684,7 +691,7 @@ If there is no strong signal worth persisting, return: {"persist_insight": null}
 
     let conversationMessages;
 
-    if (session_open || messages.length === 0) {
+    if (sessionOpenBool || messagesParsed.length === 0) {
       // Fresh session — inject context then ask Claude to open
       conversationMessages = [
         contextMessage,
@@ -696,7 +703,7 @@ If there is no strong signal worth persisting, return: {"persist_insight": null}
       conversationMessages = [
         contextMessage,
         contextAck,
-        ...messages,
+        ...messagesParsed,
         ...(user_message ? [{ role: "user", content: user_message }] : [])
       ];
     }
