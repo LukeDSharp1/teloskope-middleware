@@ -469,19 +469,37 @@ THE FIVE ADVISORY PILLARS
 
 VISUALISATIONS
 
-When a comparison or trend would be clearer as a chart, include a chart data block. The app renders these as visuals.
+When a comparison or trend would be clearer as a chart, generate it as inline HTML/SVG directly. Do not use JSON data blocks — render the chart as actual HTML that displays immediately.
 
-Format:
-<div class="chart-data" data-type="bar" data-label="Chart title">
-[{"label":"Period 1","value":12000},{"label":"Period 2","value":14500},{"label":"Period 3","value":11000}]
+Use this pattern for a bar chart:
+
+<div style="margin:16px 0;font-family:Inter,-apple-system,sans-serif">
+<p style="font-size:11px;font-weight:500;color:#888780;letter-spacing:.06em;text-transform:uppercase;margin-bottom:10px">CHART TITLE HERE</p>
+<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+  <span style="font-size:12px;color:#888780;width:90px;flex-shrink:0">Label 1</span>
+  <div style="flex:1;height:24px;background:#F1EFE8;border-radius:4px;overflow:hidden">
+    <div style="width:100%;height:100%;background:#378ADD;border-radius:4px"></div>
+  </div>
+  <span style="font-size:12px;font-weight:500;width:60px;text-align:right">$77K</span>
+</div>
+<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+  <span style="font-size:12px;color:#888780;width:90px;flex-shrink:0">Label 2</span>
+  <div style="flex:1;height:24px;background:#F1EFE8;border-radius:4px;overflow:hidden">
+    <div style="width:67%;height:100%;background:#B5D4F4;border-radius:4px"></div>
+  </div>
+  <span style="font-size:12px;font-weight:500;width:60px;text-align:right">$52K</span>
+</div>
 </div>
 
-For scenario before/after:
-<div class="chart-data" data-type="comparison" data-label="Scenario: Cut ad spend 50% — 90 day cash impact">
-[{"label":"Current trajectory","value":8200},{"label":"If ad spend cut 50%","value":11400}]
-</div>
+Rules for generating charts:
+- Calculate bar widths as percentages — the largest value = 100%, others proportional
+- Use #378ADD (blue) for current/positive bars, #B5D4F4 (light blue) for prior/neutral, #E8534A (red) for negative values
+- Format values as $XK for thousands, $X for under 1000
+- Always include the chart title in uppercase small caps style
+- Mobile-first — bars should be readable on a 390px wide screen
+- For scenario before/after: use a two-bar comparison with labels "Current" and "Scenario"
 
-Always include a chart for: cash trend (session open), revenue trend, scenario comparisons, before/after diagnostics.
+Always include a chart for: revenue trend (session open), scenario comparisons, before/after diagnostics.
 
 ---
 
