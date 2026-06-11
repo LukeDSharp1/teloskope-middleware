@@ -576,6 +576,14 @@ export default async function handler(req, res) {
   } = req.body;
 
   if (!shopify_shop_domain || !shopify_access_token || !user_id) {
+    console.log("400 — missing fields. Received:", JSON.stringify({
+      shopify_shop_domain: shopify_shop_domain || "MISSING",
+      shopify_access_token: shopify_access_token ? "present" : "MISSING",
+      user_id: user_id || "MISSING",
+      session_open,
+      session_end,
+      messages_length: Array.isArray(messages) ? messages.length : typeof messages,
+    }));
     return res.status(400).json({ error: "Missing required fields" });
   }
 
