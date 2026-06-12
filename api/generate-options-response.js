@@ -1,9 +1,17 @@
 // api/generate-options-response.js
+// V1.2: Consolidated.
+//   - WEB SEARCH: Anthropic web_search tool added to the main Claude call (max_uses 3),
+//     response extraction rewritten to concatenate text blocks (content is now interleaved
+//     with server_tool_use / web_search_tool_result blocks — content[0].text would break),
+//     system prompt given a WEB SEARCH section. Removes the manual macro-context update problem.
+//   - DATA: revenue trend now uses last 3 COMPLETE calendar months (was rolling 30-day windows
+//     mislabelled as months); trend labelled by month name; max_tokens raised 1500 -> 2000.
+//   - RETURNING CUSTOMERS: "returning" now = ordered in the 12 months before this month began
+//     (was: same 12-day window last year, which made almost everyone "new").
+//   - SUMMARISER: session_end insight extraction now reads conversation_log (was reading the
+//     legacy empty messages array, so it persisted nothing). Inert until End Session is wired
+//     in Bubble — that workflow must pass conversation_log on the session_end call.
 // V1.0: Teloskope Options — conversational advisory endpoint.
-// Pulls fresh Shopify + Xero + Meta data on session open.
-// Maintains message history in browser state — full array sent each call.
-// Returns HTML response + optional persist_insight JSON.
-// End-of-session summariser triggered by session_end: true in request body.
 
 import Anthropic from "@anthropic-ai/sdk";
 
@@ -38,6 +46,19 @@ function shiftDays(d, days) {
 
 function shiftYear(d, years) {
   return { ...d, year: d.year + years };
+}
+
+// First day of the calendar month that is `monthsBack` months before d's month.
+function monthStart(d, monthsBack) {
+  const dt = new Date(Date.UTC(d.year, d.month - monthsBack, 1));
+  return { year: dt.getUTCFullYear(), month: dt.getUTCMonth(), day: 1 };
+}
+
+// Last day of the calendar month that is `monthsBack` months before d's month.
+// Day 0 of (month+1) resolves to the last day of `month` — handles year boundaries.
+function monthEnd(d, monthsBack) {
+  const dt = new Date(Date.UTC(d.year, d.month - monthsBack + 1, 0));
+  return { year: dt.getUTCFullYear(), month: dt.getUTCMonth(), day: dt.getUTCDate() };
 }
 
 function fmtDate(d, opts = { day: "numeric", month: "long", year: "numeric" }) {
@@ -219,13 +240,13 @@ async function fetchBusinessData(params) {
   const lyMtdStart = shiftYear(mtdStart, -1);
   const lyMtdEnd = shiftYear(today, -1);
 
-  // Last 3 months for cash trend
-  const m1Start = shiftDays(today, -90);
-  const m1End = shiftDays(today, -61);
-  const m2Start = shiftDays(today, -60);
-  const m2End = shiftDays(today, -31);
-  const m3Start = shiftDays(today, -30);
-  const m3End = today;
+  // Last 3 COMPLETE calendar months (current partial month handled by MTD separately)
+  const m1Start = monthStart(today, 3);
+  const m1End   = monthEnd(today, 3);
+  const m2Start = monthStart(today, 2);
+  const m2End   = monthEnd(today, 2);
+  const m3Start = monthStart(today, 1);
+  const m3End   = monthEnd(today, 1);
 
   const todayUtc = shopEndOfDayUtc(today.year, today.month, today.day);
   const mtdStartUtc = shopMidnightUtc(mtdStart.year, mtdStart.month, mtdStart.day);
@@ -234,6 +255,12 @@ async function fetchBusinessData(params) {
   const thirtyStartUtc = shopMidnightUtc(thirtyDaysAgo.year, thirtyDaysAgo.month, thirtyDaysAgo.day);
   const ninetyStartUtc = shopMidnightUtc(ninetyDaysAgo.year, ninetyDaysAgo.month, ninetyDaysAgo.day);
 
+  // Prior-customer window: 12 months before this month began. A customer seen here
+  // and again this month is "returning". Anyone not seen here is genuinely new.
+  const priorCustStart = shiftDays(mtdStart, -365);
+  const priorCustStartUtc = shopMidnightUtc(priorCustStart.year, priorCustStart.month, priorCustStart.day);
+  const priorCustEndUtc = new Date(mtdStartUtc.getTime() - 1);
+
   const xeroAvailable = !!(xero_access_token && xero_tenant_id);
 
   const [
@@ -241,6 +268,7 @@ async function fetchBusinessData(params) {
     lyMtdOrders,
     last30Orders,
     last90Orders,
+    priorCustOrders,
     cashBalance,
     xeroMtdRevenue,
     xeroM1Revenue,
@@ -252,6 +280,7 @@ async function fetchBusinessData(params) {
     fetchAllOrders(shopify_shop_domain, shopify_access_token, lyMtdStartUtc, lyMtdEndUtc),
     fetchAllOrders(shopify_shop_domain, shopify_access_token, thirtyStartUtc, todayUtc),
     fetchAllOrders(shopify_shop_domain, shopify_access_token, ninetyStartUtc, todayUtc),
+    fetchAllOrders(shopify_shop_domain, shopify_access_token, priorCustStartUtc, priorCustEndUtc, "created_at,customer"),
     xeroAvailable ? fetchXeroCashBalance(xero_access_token, xero_tenant_id, xero_refresh_token, xero_connection_id) : Promise.resolve(null),
     xeroAvailable ? fetchXeroRevenue(mtdStartUtc, todayUtc, xero_access_token, xero_tenant_id, xero_refresh_token, xero_connection_id) : Promise.resolve(null),
     xeroAvailable ? fetchXeroRevenue(
@@ -282,8 +311,9 @@ async function fetchBusinessData(params) {
   const last30Tx = last30Orders.length;
   const aov30 = last30Tx > 0 ? last30Rev / last30Tx : 0;
 
-  // New vs returning (MTD)
-  const priorIds = new Set(lyMtdOrders.filter(o => o.customer?.id).map(o => String(o.customer.id)));
+  // New vs returning (MTD): "returning" = ordered at any point in the 12 months
+  // before this month began, not merely the same window last year.
+  const priorIds = new Set(priorCustOrders.filter(o => o.customer?.id).map(o => String(o.customer.id)));
   let newMtd = 0, retMtd = 0;
   for (const o of mtdOrders) {
     if (!o.customer?.id) { newMtd++; continue; }
@@ -338,7 +368,7 @@ function buildDataContext(data, storeName, firstName, profile = {}) {
   } = data;
 
   const pct = (a, b) => b > 0 ? `${(((a - b) / b) * 100).toFixed(1)}%` : "N/A";
-  const fmtPeriod = (s, e) => `${fmtDate(s, { day: "numeric", month: "short" })} – ${fmtDate(e, { day: "numeric", month: "short" })}`;
+  const fmtMonthLabel = (s) => fmtDate({ year: s.year, month: s.month, day: 1 }, { month: "long", year: "numeric" });
 
   return `
 BUSINESS: ${storeName}
@@ -357,10 +387,11 @@ BUSINESS PROFILE:
 LIVE BANK BALANCE (Xero bank feed):
 ${cashBalance !== null ? fmt$(cashBalance) : "Not available — Xero not connected"}
 
-REVENUE TREND — last 3 periods (Xero P&L, ex-GST):
-- ${fmtPeriod(m1Start, m1End)}: ${xeroM1Revenue !== null ? fmt$(xeroM1Revenue) : "N/A"}
-- ${fmtPeriod(m2Start, m2End)}: ${xeroM2Revenue !== null ? fmt$(xeroM2Revenue) : "N/A"}
-- ${fmtPeriod(m3Start, m3End)}: ${xeroM3Revenue !== null ? fmt$(xeroM3Revenue) : "N/A"}
+REVENUE TREND — last 3 complete calendar months (Xero P&L, ex-GST):
+- ${fmtMonthLabel(m1Start)}: ${xeroM1Revenue !== null ? fmt$(xeroM1Revenue) : "N/A"}
+- ${fmtMonthLabel(m2Start)}: ${xeroM2Revenue !== null ? fmt$(xeroM2Revenue) : "N/A"}
+- ${fmtMonthLabel(m3Start)}: ${xeroM3Revenue !== null ? fmt$(xeroM3Revenue) : "N/A"}
+These are complete calendar months. The current month is partial and shown separately as MTD below — do not compare a partial month against these complete months.
 
 MONTH TO DATE (Shopify online, ex-GST):
 - Revenue: ${fmt$(mtdRevOnline)} | ${mtdTx} orders
@@ -374,6 +405,7 @@ CUSTOMER MIX (MTD):
 - New customers: ${newMtd}
 - Returning customers: ${retMtd}
 - Returning rate: ${(newMtd + retMtd) > 0 ? Math.round((retMtd / (newMtd + retMtd)) * 100) : 0}%
+(Returning = ordered at least once in the 12 months before this month began.)
 
 META ADS (last 30 days):
 ${metaLast30 && metaLast30.spend > 0
@@ -412,9 +444,68 @@ YOUR NORTH STAR — HONEST ASSESSMENT, NOT OPTIMISM
 
 Teloskope's purpose is honest clarity. That means helping owners understand what is actually possible — including when the answer is uncomfortable.
 
-You will sometimes need to say: "You don't have sufficient margin or cash to chase growth right now — doing so will make things worse, not better."
+You are not here to encourage. You are here to tell the truth about what the numbers say.
+
+When an owner proposes something that requires cash they don't have, margin they haven't demonstrated, or execution capacity that isn't visible in the data — say so directly. Once. Clearly. Then help them find a path that is actually achievable.
+
+Optimism is not kindness when it leads someone toward a decision that will damage their business. The most respectful thing you can do is be honest about the odds.
+
+You will sometimes need to say things like:
+
+"What you're describing isn't impossible, but the numbers say it's going to be very hard to execute from where you are. Let's be realistic about what it actually requires — the cash, the margin, the time, the runway. If we model it honestly, here's what we're looking at."
+
+Or: "You don't have sufficient margin or cash to chase growth right now — doing so will make things worse, not better."
 
 Or: "The model works, but it needs more capital before it can scale. That's not a failure — it's just what the numbers say."
+
+Or: "This might not be the right time to grow. Protecting what's working could be more valuable right now than pushing for more."
+
+RETAIL CALENDAR INTELLIGENCE
+
+Before flagging any revenue movement as concerning or asking the owner to explain it, check whether it has an obvious seasonal or calendar explanation. A good retail consultant knows the calendar. You should too.
+
+Australian retail calendar — key events by month:
+- January: post-Christmas slowdown, clearance sales, back to school late Jan
+- February: Valentine's Day (14th) — gifting spike
+- March/April: Easter (moves — can fall in March or April), school holidays, Mother's Day prep begins
+- May: Mother's Day (second Sunday) — major gifting event, one of the biggest of the year for homewares, ceramics, lifestyle brands
+- June: EOFY — consumer caution, some clearance activity, mid-year sales
+- July: EOFY sales continue, school holidays, winter slowdown for discretionary
+- August: quieter month, some brands do mid-year pushes
+- September: Father's Day (first Sunday), spring renewal, home/lifestyle category picks up
+- October: school holidays, pre-Christmas awareness building
+- November: Black Friday / Cyber Monday (last week) — now the biggest sales event of the year for online retail
+- December: Christmas gifting — peak month for most retail, especially homewares and lifestyle
+- January again: sharp post-Christmas drop is normal, not alarming
+
+For a business like Alex & Trahanas (Italian homewares, ceramics, gifting category):
+- April-May spike is almost certainly Easter + Mother's Day combined. That's not anomalous — that's the business working.
+- June drop after Mother's Day is normal and expected.
+- The relevant question is not "what caused the April spike" — it's "how does this year's peak compare to last year's peak, and are we building a customer base that returns outside of peak season."
+
+DIAGNOSTIC QUALITY STANDARD
+
+Before asking the owner to explain a revenue movement:
+1. Can it be explained by the retail calendar? If yes, name the explanation and move on.
+2. Is the movement actually outside normal seasonal range? If not, don't flag it as a problem.
+3. What is the year-on-year comparison for the same period? That's the real signal — not month-on-month.
+4. What does the customer mix tell you? New vs returning customers in peak vs off-peak periods is more informative than raw revenue movement.
+
+Month-on-month comparisons in retail are almost always misleading without seasonal context. Year-on-year same-period comparisons are the right lens. Use them.
+
+The revenue trend in your briefing is three COMPLETE calendar months, labelled by month name. The current month is partial and appears separately as MTD. Never compare the partial current month against a complete month and call the difference a decline — that is a measurement artifact, not a business signal.
+
+WEB SEARCH
+
+You have a web search tool. Use it when current external data would materially sharpen the advice — the live AUD/EUR rate for an importer pricing a new order, freight indices, the current RBA cash rate, a recent ABS retail release, or category-specific news. Search sparingly: at most one or two targeted searches in a response, and only when the figure actually changes the answer. Never search for something the business data already shows, or something stable you already know. Do not narrate the search ("let me look that up") — just use the result. When you cite a searched figure, state it plainly with its date in prose, e.g. "the AUD/EUR rate is around 0.60 as of this week". Keep it light — the conversation is about their business, not a market report.
+
+Small retail businesses in Australia are operating in a genuinely difficult environment. Hold this context:
+- Household discretionary spending is under real pressure — cost of living, mortgage stress, and consumer caution are structural, not temporary
+- Businesses in considered-purchase categories (homewares, fashion, gifting) are feeling this acutely
+- Many small retailers are going to the wall — not because they're badly run, but because the environment is unforgiving right now
+- Cash runway is not a buffer — it is survival time. Treat it as such.
+
+This doesn't mean catastrophising. It means being clear-eyed. A business with $190K cash and declining revenue has runway — but that runway is finite and the clock is running. Say so.
 
 Never recommend a short-term fix without naming what it costs tomorrow. Every lever has a cost. Name it.
 
@@ -617,7 +708,7 @@ export default async function handler(req, res) {
     owner_challenge = "",
     // Conversation
     messages = [],             // Legacy — kept for backwards compat
-    conversation_log = "",     // Plain text conversation history — easier to build in Bubble
+    conversation_log = "",     // Plain text / HTML conversation history — stripped server-side
     user_message,              // Current user message (null on session open)
     prior_insights = [],       // Persisted insights from Bubble user_insights records
     // Control
@@ -640,6 +731,14 @@ export default async function handler(req, res) {
 
   const firstName = (user_name || "").split(" ")[0] || user_name;
 
+  // Strip HTML/style to plain text — used for both continuing-session history
+  // and the session_end summariser.
+  const toPlainText = (html) => (html || "")
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
   try {
     // Bubble sends arrays as strings — parse if needed
     const messagesParsed = typeof messages === "string" ? JSON.parse(messages || "[]") : (messages || []);
@@ -655,9 +754,10 @@ export default async function handler(req, res) {
     if (sessionEndBool) {
       console.log("Options: session end — running insight summariser...");
 
-      const conversationText = messagesParsed
-        .map(m => `${m.role === "user" ? "Owner" : "Teloskope"}: ${m.content}`)
-        .join("\n\n");
+      // Read from conversation_log (the real transcript). Fall back to the legacy
+      // messages array only if conversation_log is empty.
+      const conversationText = toPlainText(conversation_log) ||
+        messagesParsed.map(m => `${m.role === "user" ? "Owner" : "Teloskope"}: ${m.content}`).join("\n\n");
 
       const summariserResponse = await anthropic.messages.create({
         model: "claude-sonnet-4-20250514",
@@ -683,7 +783,11 @@ If there is no strong signal worth persisting, return: {"persist_insight": null}
       });
 
       try {
-        const raw = summariserResponse.content[0].text.trim();
+        const raw = summariserResponse.content
+          .filter(b => b.type === "text")
+          .map(b => b.text)
+          .join("")
+          .trim();
         const parsed = JSON.parse(raw);
 
         // Write insight to Bubble if one exists
@@ -733,9 +837,13 @@ If there is no strong signal worth persisting, return: {"persist_insight": null}
     });
 
     // ─── BUILD PRIOR INSIGHTS BLOCK ───────────────────────────────────────────
-    const insightsBlock = priorInsightsParsed.length > 0
-      ? `\nPRIOR OBSERVATIONS (from previous sessions):\n${priorInsightsParsed.map(i => `- [${i.category}] ${i.insight_text}`).join("\n")}`
-      : "";
+    // Accept prior_insights as plain text (Bubble-friendly) or legacy JSON array.
+    let insightsBlock = "";
+    if (typeof prior_insights === "string" && prior_insights.trim()) {
+      insightsBlock = `\nPRIOR OBSERVATIONS (from previous sessions):\n${prior_insights.trim()}`;
+    } else if (Array.isArray(priorInsightsParsed) && priorInsightsParsed.length > 0) {
+      insightsBlock = `\nPRIOR OBSERVATIONS (from previous sessions):\n${priorInsightsParsed.map(i => `- [${i.category}] ${i.insight_text}`).join("\n")}`;
+    }
 
     // ─── BUILD MESSAGE ARRAY ──────────────────────────────────────────────────
     // System context injected as first user message (Anthropic pattern)
@@ -760,11 +868,7 @@ If there is no strong signal worth persisting, return: {"persist_insight": null}
       ];
     } else {
       // Continuing session — strip HTML tags from conversation_log to get plain text history
-      const plainHistory = (conversation_log || "")
-        .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
-        .replace(/<[^>]+>/g, " ")
-        .replace(/\s+/g, " ")
-        .trim();
+      const plainHistory = toPlainText(conversation_log);
 
       // Build as proper alternating turns
       conversationMessages = [
@@ -784,16 +888,27 @@ If there is no strong signal worth persisting, return: {"persist_insight": null}
       ];
     }
 
-    // ─── CALL CLAUDE ──────────────────────────────────────────────────────────
+    // ─── CALL CLAUDE (with web search) ────────────────────────────────────────
     console.log("Options: calling Claude, messages in context:", conversationMessages.length);
     const claudeResponse = await anthropic.messages.create({
       model: "claude-sonnet-4-20250514",
-      max_tokens: 1500,
+      max_tokens: 2000,
       system: OPTIONS_SYSTEM_PROMPT,
       messages: conversationMessages,
+      tools: [{
+        type: "web_search_20250305",
+        name: "web_search",
+        max_uses: 3,
+      }],
     });
 
-    const responseHtml = claudeResponse.content[0].text;
+    // With web search enabled, content interleaves text / server_tool_use /
+    // web_search_tool_result blocks. Concatenate the text blocks only.
+    const responseHtml = claudeResponse.content
+      .filter(block => block.type === "text")
+      .map(block => block.text)
+      .join("");
+
     console.log("Options: Claude response, chars:", responseHtml.length);
 
     // ─── RETURN ───────────────────────────────────────────────────────────────
