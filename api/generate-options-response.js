@@ -760,7 +760,7 @@ export default async function handler(req, res) {
         messagesParsed.map(m => `${m.role === "user" ? "Owner" : "Teloskope"}: ${m.content}`).join("\n\n");
 
       const summariserResponse = await anthropic.messages.create({
-        model: "claude-sonnet-4-20250514",
+        model: "claude-sonnet-4-5",
         max_tokens: 500,
         system: "You extract key business insights from advisor conversations to persist as memory for future sessions. Return only valid JSON, no other text.",
         messages: [{
