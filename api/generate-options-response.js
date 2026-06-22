@@ -891,7 +891,7 @@ If there is no strong signal worth persisting, return: {"persist_insight": null}
     // ─── CALL CLAUDE (with web search) ────────────────────────────────────────
     console.log("Options: calling Claude, messages in context:", conversationMessages.length);
     const claudeResponse = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-4-5",
       max_tokens: 2000,
       system: OPTIONS_SYSTEM_PROMPT,
       messages: conversationMessages,
