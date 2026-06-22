@@ -1,5 +1,5 @@
 // api/generate-weekly-brief.js
-// V1.8: Six fixes applied.
+// V1.8a: Model string updated claude-sonnet-4-20250514 → claude-sonnet-4-5.
 //   1. WEB SEARCH: Added Anthropic web_search tool to the Claude call. ABS_MACRO_CONTEXT
 //      removed — Claude fetches current macro context dynamically each Monday. Claude also
 //      returns a one-sentence HTML market context card summary via [MARKET_CONTEXT]...[/MARKET_CONTEXT]
@@ -760,7 +760,7 @@ First use web search to find current Australian retail market context relevant t
     console.log("Calling Claude with web search...");
     const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
     const claudeResponse = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-4-5",
       max_tokens: 2000,
       system: systemPrompt,
       messages: [{ role: "user", content: userPrompt }],
