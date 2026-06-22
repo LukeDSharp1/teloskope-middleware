@@ -1,5 +1,5 @@
 // api/generate-options-response.js
-// V1.2: Consolidated.
+// V1.2a: Model string updated claude-sonnet-4-20250514 → claude-sonnet-4-5 (both main call and summariser).
 //   - WEB SEARCH: Anthropic web_search tool added to the main Claude call (max_uses 3),
 //     response extraction rewritten to concatenate text blocks (content is now interleaved
 //     with server_tool_use / web_search_tool_result blocks — content[0].text would break),
